@@ -6,7 +6,7 @@ D=/opt/dn/lib/dotnet
 CSC="$D/dotnet $(ls -d $D/sdk/*/Roslyn/bincore/csc.dll | head -1)"
 NS=$(ls -d $D/packs/NETStandard.Library.Ref/*/ref/netstandard2.1)
 NSREFS=$(ls $NS/*.dll | sed 's/^/-r:/' | tr '\n' ' ')
-P=/home/claude/probe; B=$P/build; rm -rf $B; mkdir -p $B/stubs $B/tpk/bin $B/tpk/res $B/tpk/shared/res $B/tpk/lib
+P=$(cd "$(dirname "$0")" && pwd); B=$P/build;   # P: this folder (stubs/ and TvProbe/ are next to this script) rm -rf $B; mkdir -p $B/stubs $B/tpk/bin $B/tpk/res $B/tpk/shared/res $B/tpk/lib
 cs() { $CSC -nologo -nostdlib -noconfig -deterministic $NSREFS "$@"; }
 cs -target:library -out:$B/stubs/Tizen.Applications.Common.dll $P/stubs/Common.cs
 cs -target:library -out:$B/stubs/Tizen.Applications.Service.dll -r:$B/stubs/Tizen.Applications.Common.dll $P/stubs/Service.cs
