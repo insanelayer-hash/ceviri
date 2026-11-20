@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns="http://tizen.org/ns/packages" api-version="5.5" package="TrCeviri01" version="1.14.0">
+  <profile name="common" />
+  <service-application appid="TrCeviri01.TvProbe"
+                       exec="TvProbe.dll"
+                       type="dotnet"
+                       multiple="false"
+                       taskmanage="false"
+                       nodisplay="true"
+                       on-boot="true"
+                       api-version="5.5">
+    <label>TvProbe</label>
+    <icon>TvProbe.png</icon>
+  </service-application>
+  <privileges>
+    <privilege>http://tizen.org/privilege/internet</privilege>
+    <privilege>http://developer.samsung.com/privilege/contentanalysis</privilege>
+  </privileges>
+</manifest>

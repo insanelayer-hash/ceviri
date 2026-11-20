@@ -1,0 +1,10 @@
+*.xcodeproj
+build/
+Payload/
+*.ipa
+Zonos/ios/
+zonos-src/
+__pycache__/
+*.pyc
+Zonos/bakeoff/klipler/*.wav
+DEVIR.md

@@ -1,0 +1,8 @@
+# TR Altyazi - sesli ceviri ayarlari
+# tv: televizyonun adresi, anahtar: TV uygulamasinin anahtari
+# hiz: en yuksek konusma hizi (harf/sn)
+# kendi_ses: Turkce seste karakterin kendi sesinin payi, 0-100. Yuksek = karaktere daha cok benzer ama aksan artar; 0 = tamamen temiz hazir ses.
+tv=
+anahtar=
+hiz=20
+kendi_ses=0

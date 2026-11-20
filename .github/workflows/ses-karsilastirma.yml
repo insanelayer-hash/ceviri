@@ -1,0 +1,103 @@
+name: Ses karsilastirma
+
+# Which voice model reads Turkish properly in the voice of a game character? The same three Turkish lines, each
+# with the clip of one of the user's game characters (Zonos/bakeoff/klipler), through several models on this
+# machine's processor. Each job publishes its WAV files on its own branch (ornek-<model>); they are compared by ear.
+# Speed is not measured here (no graphics card): the model that wins is timed on the user's own computer.
+on:
+  push:
+    paths:
+      - 'Zonos/bakeoff/**'
+      - '.github/workflows/ses-karsilastirma.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  freya:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: FreyaTTS
+        run: |
+          pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          git clone --depth 1 https://github.com/freyavoiceai/FreyaTTS freya-src
+          pip install -q -r freya-src/requirements.txt
+          mkdir -p out
+          cd Zonos/bakeoff && PYTHONPATH=$GITHUB_WORKSPACE/freya-src:. python freya.py $GITHUB_WORKSPACE/out
+      - uses: actions/upload-artifact@v4
+        with: { name: freya-wavs, path: out }
+      - name: Publish
+        run: |
+          cd out && git init -q -b ornek-freya && git add -A
+          git -c user.name=build -c user.email=build@users.noreply.github.com commit -q -m "samples"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}" ornek-freya
+
+  chatterbox:
+    runs-on: ubuntu-latest
+    needs: freya
+    if: always()
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: freya-wavs, path: freya }
+      - name: Chatterbox Multilingual and voice conversion
+        run: |
+          pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -q chatterbox-tts
+          mkdir -p out freya
+          cd Zonos/bakeoff && python chatterbox_run.py $GITHUB_WORKSPACE/out $GITHUB_WORKSPACE/freya
+          ls -l $GITHUB_WORKSPACE/out
+      - name: Publish
+        run: |
+          cd out && git init -q -b ornek-chatterbox && git add -A
+          git -c user.name=build -c user.email=build@users.noreply.github.com commit -q -m "samples"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}" ornek-chatterbox
+
+  xtts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: XTTS-v2
+        env:
+          COQUI_TOS_AGREED: '1'   # the model's non-commercial licence (CPML), accepted by the user for private use
+        run: |
+          pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -q "coqui-tts[codec]"
+          mkdir -p out
+          cd Zonos/bakeoff && python xtts.py $GITHUB_WORKSPACE/out
+      - name: Publish
+        run: |
+          cd out && git init -q -b ornek-xtts && git add -A
+          git -c user.name=build -c user.email=build@users.noreply.github.com commit -q -m "samples"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}" ornek-xtts
+
+  omnivoice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: OmniVoice
+        run: |
+          pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -q omnivoice soundfile
+          mkdir -p out
+          cd Zonos/bakeoff && python omni.py $GITHUB_WORKSPACE/out
+      - name: Publish
+        run: |
+          cd out && git init -q -b ornek-omnivoice && git add -A
+          git -c user.name=build -c user.email=build@users.noreply.github.com commit -q -m "samples"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}" ornek-omnivoice

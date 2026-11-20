@@ -1,0 +1,50 @@
+name: Build IPA
+
+# Builds an unsigned .ipa; install it with Sideloadly (it signs with your Apple ID).
+on:
+  push:
+    paths-ignore:
+      - '.github/workflows/zonos-check.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode version
+        run: xcodebuild -version
+      # The runtime takes a long time to compile (its text preparation alone is a large Rust library),
+      # so the finished library is kept until something under Zonos/ or this file changes.
+      - uses: actions/cache@v4
+        id: zonos
+        with:
+          path: Zonos/ios/libzonos_all.a
+          key: zonos-ios-a50e1411-${{ hashFiles('Zonos/CMakeLists.txt', 'Zonos/build-ios.sh', 'Zonos/zb.cpp', 'Zonos/zb.h', 'Zonos/zb_server.cpp', '.github/workflows/build.yml') }}
+      - name: Voice model runtime (ZONOS3-Mini, pinned) for the iPhone
+        if: steps.zonos.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/Zyphra/ZONOS3-Mini zonos-src
+          git -C zonos-src checkout a50e14117d99181ba7f28047b451ba03ba1a09a9
+          git -C zonos-src submodule update --init --depth 1 servers/ggml/ggml third_party/zyphra-textnorm
+          Zonos/build-ios.sh zonos-src Zonos/ios
+          rm -rf Zonos/ios/build
+      - name: Generate project
+        run: brew install xcodegen && xcodegen generate
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project TRAltyazi.xcodeproj -scheme TRAltyazi -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 200
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/TRAltyazi.app Payload/
+          zip -qr TRAltyazi.ipa Payload
+          ls -l TRAltyazi.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TRAltyazi-ipa
+          path: TRAltyazi.ipa

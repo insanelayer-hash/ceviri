@@ -1,0 +1,39 @@
+name: TRAltyazi
+options:
+  bundleIdPrefix: com.trceviri
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.28.0"
+    CURRENT_PROJECT_VERSION: 32
+targets:
+  TRAltyazi:
+    type: application
+    platform: iOS
+    sources: [TRAltyazi]
+    scheme: {}
+    info:
+      path: TRAltyazi/Info.plist
+      properties:
+        CFBundleDisplayName: "TR Altyazı"
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSSpeechRecognitionUsageDescription: "Oyundaki İngilizce konuşmayı, televizyondan gelen sesi dinleyerek yazıya çevirmek için."
+        NSLocalNetworkUsageDescription: "TV'deki TR Altyazı servisine bağlanıp altyazıları çevirmek için."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trceviri.altyazi
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        SWIFT_OBJC_BRIDGING_HEADER: TRAltyazi/Bridge.h
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Zonos"]
+        LIBRARY_SEARCH_PATHS: ["$(SRCROOT)/Zonos/ios"]
+        OTHER_LDFLAGS: ["-lzonos_all", "-lc++", "-framework", "Accelerate", "-framework", "Metal", "-framework", "MetalKit", "-framework", "Foundation"]

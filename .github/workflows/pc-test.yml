@@ -1,0 +1,133 @@
+name: PC test
+
+# The measurement for a desktop computer with a graphics card: builds zb-pc (the model's own server, as in the
+# iPhone app, plus a timer) for Windows with Vulkan, tries the whole package here on the build machine's
+# processor, and uploads the folder the user runs (OLCUM.bat).
+on:
+  push:
+    paths:
+      - 'Zonos/zb_pc.cpp'
+      - 'Zonos/zb_pc_voice.cpp'
+      - 'Zonos/mock_tv.py'
+      - 'Zonos/accent_samples.py'
+      - 'pc/**'
+      - '.github/workflows/pc-test.yml'
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - name: Keep line endings as they are (the model's patches must apply)
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - name: ZONOS3-Mini source (pinned)
+        shell: bash
+        run: |
+          git clone https://github.com/Zyphra/ZONOS3-Mini zonos-src
+          cd zonos-src
+          git checkout a50e14117d99181ba7f28047b451ba03ba1a09a9
+          git submodule update --init --depth 1 servers/ggml/ggml third_party/zyphra-textnorm
+      - uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-vulkan-2
+      - name: Vulkan headers, loader and shader compiler
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install vulkan-headers vulkan-loader shaderc spirv-headers --triplet x64-windows
+          Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\tools" -Recurse -Filter glslc.exe | ForEach-Object { $_.FullName }
+      - name: Build
+        run: |
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT -replace '\\', '/'
+          $src = "$PWD/zonos-src" -replace '\\', '/'
+          cmake -S Zonos -B build -A x64 "-DZONOS_SRC=$src" -DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows "-DVulkan_GLSLC_EXECUTABLE=$vcpkg/installed/x64-windows/tools/shaderc/glslc.exe"
+          cmake --build build --config Release --target zb-pc tr-altyazi-ses zb-serve -- /m /v:m
+      - name: Package
+        run: |
+          New-Item -ItemType Directory pc-olcum | Out-Null
+          Copy-Item build\Release\zb-pc.exe, pc\OLCUM.bat, TRAltyazi\Voices\Minjun.npy, TRAltyazi\Voices\zonos3_mini_heads_tr.json pc-olcum
+          # The C++ runtime next to the program, so nothing has to be installed on the user's computer.
+          foreach ($d in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcomp140.dll', 'concrt140.dll') {
+            if (Test-Path "C:\Windows\System32\$d") { Copy-Item "C:\Windows\System32\$d" pc-olcum }
+          }
+          # The spoken translation: the same files around the other program.
+          New-Item -ItemType Directory pc-ses | Out-Null
+          Copy-Item pc-olcum\*.dll, pc-olcum\zonos3_mini_heads_tr.json, build\Release\tr-altyazi-ses.exe, pc\BASLAT.bat, pc\ayar.txt pc-ses
+          New-Item -ItemType Directory pc-ses\sesler | Out-Null
+          Copy-Item TRAltyazi\Voices\*.npy pc-ses\sesler
+          Get-ChildItem build\Release | Format-Table Name, Length
+          Get-ChildItem pc-ses | Format-Table Name, Length
+          Get-ChildItem pc-olcum | Format-Table Name, Length
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          & $vs /dependents pc-olcum\zb-pc.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pc-olcum
+          path: pc-olcum
+      - name: Try it here (processor only; this machine has no graphics card)
+        shell: cmd
+        run: |
+          xcopy /e /i /q pc-olcum try
+          if exist build\Release\vulkan-1.dll copy build\Release\vulkan-1.dll try
+          if not exist try\vulkan-1.dll copy "%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin\vulkan-1.dll" try
+          cd try
+          call OLCUM.bat cpu
+          set KOD=%ERRORLEVEL%
+          echo exit code %KOD%
+          type sonuc.txt
+          echo ---- log ----
+          powershell -Command "Get-Content gunluk.txt -Tail 60"
+          exit /b %KOD%
+      - name: Try the spoken translation against a stand-in TV (processor only)
+        shell: bash
+        run: |
+          cp -r pc-ses try-ses
+          mv try/modeller try-ses/modeller
+          cp try/vulkan-1.dll try-ses/
+          printf 'tv=127.0.0.1\r\nanahtar=test\r\n' > try-ses/ayar.txt
+          python Zonos/mock_tv.py 8090 try/ornek-1.wav 14 try-ses/sonuc.txt try-ses > try-ses/mock.txt 2>&1 &
+          MOCK=$!
+          cd try-ses
+          ./tr-altyazi-ses.exe modeller sesler zonos3_mini_heads_tr.json ayar.txt cpu > pencere.txt 2> gunluk.txt &
+          PROG=$!
+          wait $MOCK && RESULT=0 || RESULT=$?
+          kill $PROG || true
+          cat pencere.txt; echo ----; cat mock.txt; echo ----; tail -5 gunluk.txt
+          exit $RESULT
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deneme-sonucu
+          path: |
+            try/sonuc.txt
+            try/gunluk.txt
+            try/*.wav
+            try-ses/*.txt
+      - name: The user's characters at four shares of their own voice (samples to listen to)
+        shell: bash
+        run: |
+          python -m pip install -q numpy
+          cp try/vulkan-1.dll build/Release/ || true
+          ./build/Release/zb-serve.exe try-ses/modeller/backbone-ptq-edit.gguf try-ses/modeller/zac-keep2.gguf TRAltyazi/Voices/zonos3_mini_heads_tr.json port.txt > serve.log 2>&1 &
+          for i in $(seq 1 180); do [ -s port.txt ] && break; sleep 1; done
+          [ -s port.txt ] || { tail -40 serve.log; exit 1; }
+          python Zonos/accent_samples.py http://127.0.0.1:$(cat port.txt | tr -d '\r\n') Zonos/ornek_karakterler.txt TRAltyazi/Voices ornekler
+          cp try-ses/said-*.pcm ornekler/ || true
+          cd ornekler
+          git init -q -b pc-ornekler
+          git add -A
+          git -c user.name=build -c user.email=build@users.noreply.github.com commit -q -m "Voice samples (${GITHUB_SHA::7})"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}" pc-ornekler
+      - name: Publish the package (branch pc-ses)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd pc-ses
+          git init -q -b pc-ses
+          git add -A
+          git -c user.name=build -c user.email=build@users.noreply.github.com commit -q -m "PC voice package (${GITHUB_SHA::7})"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}" pc-ses

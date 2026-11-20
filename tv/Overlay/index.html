@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>TR Altyazi</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+  /* The Turkish line. It sits centred over the English one, anchored by its bottom edge,
+     and is always in the page: it fades in and out instead of popping, and when one line
+     follows another only the text changes. */
+  #sub {
+    position: absolute; left: 0; bottom: 0; box-sizing: border-box;
+    -webkit-transform: translateX(-50%); transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.88); color: #fff; border-radius: 8px;
+    font-family: "SamsungOne", "Samsung Sans", sans-serif; font-weight: 600;
+    text-align: center; line-height: 1.25; padding: 3px 12px;
+    width: -webkit-max-content; width: max-content; max-width: 1760px;
+    display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center;
+    -webkit-justify-content: center; justify-content: center;
+    text-shadow: 0 2px 3px #000;
+    opacity: 0; -webkit-transition: opacity 140ms linear; transition: opacity 140ms linear;
+  }
+  #sub.on { opacity: 1; -webkit-transition-duration: 50ms; transition-duration: 50ms; }
+  #sub .name { color: #ffd34d; }
+  /* Experiments (chosen by the service's "style" setting). s1: the browser blurs whatever is
+     behind the box. s2: no box; a soft patch of the scene's own colours, made by the service,
+     sits behind the text. Both draw the text like the game does: white with a dark edge. */
+  #sub.s1, #sub.s2 { padding: 0; font-weight: 500; text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 3px rgba(0,0,0,0.9); }
+  #text { -webkit-flex: none; flex: none; }
+  #sub.s1 { background: rgba(0, 0, 0, 0.16); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); }
+  #sub.s2 { background: transparent; }
+  #patch { position: absolute; left: 0; top: 0; z-index: -1; display: none; }
+  #sub.s2 #patch { display: block; }
+  #hud {
+    position: absolute; left: 24px; top: 20px; padding: 8px 14px; border-radius: 8px;
+    background: rgba(0, 0, 0, 0.6); color: #9fe; font: 22px sans-serif; display: none;
+  }
+  #toast {
+    position: absolute; left: 50%; top: 40px; transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.75); color: #fff; font: 26px sans-serif; padding: 12px 24px; border-radius: 10px;
+  }
+</style>
+</head>
+<body>
+<div id="sub"><canvas id="patch"></canvas><div id="text"></div></div>
+<div id="hud"></div>
+<div id="toast">TR Altyazı açılıyor…</div>
+<script>
+(function () {
+  // The web runtime may block loopback, so try several addresses for the service and
+  // keep the first one that answers. TV_ADRESI is a placeholder: when packaging the overlay, write the
+  // TV's own address on the home network in its place (like the key, it is not kept in the project).
+  var CANDIDATES = ['http://127.0.0.1:8090', 'http://localhost:8090', 'http://TV_ADRESI:8090'];
+  var SERVICE = null, tries = [];
+  var sub = document.getElementById('sub');
+  var text = document.getElementById('text');
+  var patch = document.getElementById('patch'), tiny = document.createElement('canvas');
+  var hud = document.getElementById('hud');
+  var toast = document.getElementById('toast');
+  var lastSeq = -1, hudOn = false, hidden = false;
+
+  function say(msg, ms) {
+    toast.textContent = msg; toast.style.display = 'block';
+    clearTimeout(say.t); say.t = setTimeout(function () { toast.style.display = 'none'; }, ms || 4000);
+  }
+
+  // 1) Show the game console's HDMI picture full screen behind this page.
+  // Which input: the one chosen in the phone app (the service's "hdmi" setting, remembered
+  // here too so there is no detour through another input at start-up); otherwise the input
+  // the TV was already showing; otherwise the first one with a device on it.
+  var sources = [], curHdmi = 0, wantHdmi = 0, shown = false;
+  try { wantHdmi = parseInt(localStorage.getItem('hdmi') || '0', 10) || 0; } catch (e) {}
+
+  function listSources(done) {
+    try {
+      tizen.systeminfo.getPropertyValue('VIDEOSOURCE', function (vs) {
+        var all = vs.connected || [], list = [];
+        for (var i = 0; i < all.length; i++) if (all[i].type === 'HDMI') list.push(all[i]);
+        sources = list; done();
+      }, function (e) { say('Kaynak listesi alınamadı: ' + e.message, 10000); done(); });
+    } catch (e) { say('TV penceresi hatası: ' + e.message, 10000); done(); }
+  }
+
+  function findSource(n) {
+    for (var i = 0; i < sources.length; i++) if (sources[i].number === n) return sources[i];
+    return null;
+  }
+
+  function showSource(src) {
+    function fail(e) { say('Görüntü açılamadı: ' + e.message, 10000); }
+    try {
+      tizen.tvwindow.setSource(src, function () {
+        curHdmi = src.number; report();
+        if (shown) { say('HDMI ' + src.number + ' gösteriliyor', 3000); return; }
+        tizen.tvwindow.show(function () {
+          shown = true;
+          say('HDMI ' + src.number + ' gösteriliyor · Geri: çıkış · Kırmızı: bilgi · Yeşil: gizle', 5000);
+        }, fail, ['0px', '0px', '1920px', '1080px'], 'MAIN', 'BEHIND');
+      }, function (e) { say('Kaynak seçilemedi: ' + e.message, 10000); }, 'MAIN');
+    } catch (e) { fail(e); }
+  }
+
+  function showHdmi() {
+    listSources(function () {
+      if (!sources.length) { say('Bağlı HDMI kaynağı bulunamadı', 8000); return; }
+      var pick = findSource(wantHdmi);
+      if (pick) { showSource(pick); return; }
+      try {
+        tizen.tvwindow.getSource(function (s) {
+          showSource((s && s.type === 'HDMI' && findSource(s.number)) || sources[0]);
+        }, function () { showSource(sources[0]); }, 'MAIN');
+      } catch (e) { showSource(sources[0]); }
+    });
+  }
+
+  // Tell the service which inputs exist and which one is up, for the phone app's picker.
+  function report() {
+    if (!SERVICE) return;
+    var nums = [];
+    for (var i = 0; i < sources.length; i++) nums.push(sources[i].number);
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', SERVICE + '/sources?list=' + nums.join(',') + '&cur=' + curHdmi + '&t=' + Date.now());
+      xhr.timeout = 2000; xhr.send();
+    } catch (e) {}
+  }
+
+  // The phone app changed the input (d.hdmi; 0 = automatic): switch to it.
+  function follow(d) {
+    if (typeof d.hdmi !== 'number' || d.hdmi === wantHdmi) return;
+    wantHdmi = d.hdmi;
+    try { localStorage.setItem('hdmi', String(wantHdmi)); } catch (e) {}
+    if (!wantHdmi) return;
+    listSources(function () {
+      var pick = findSource(wantHdmi);
+      if (pick && pick.number !== curHdmi) showSource(pick); else report();
+    });
+  }
+
+  // Sound experiment: the service asks for a test sound ("kind,frequency,ms,volume"); we play
+  // it over the game sound and tell the service what happened.
+  var lastSnd = null, actx = null;
+  function tell(msg) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open('GET', SERVICE + '/sndr?msg=' + encodeURIComponent(msg) + '&t=' + Date.now());
+      x.timeout = 2000; x.send();
+    } catch (e) {}
+  }
+  function wavUri(f, ms, v) {
+    var rate = 22050, n = Math.floor(rate * ms / 1000), b = new Uint8Array(44 + n * 2), dv = new DataView(b.buffer);
+    function str(o, t) { for (var i = 0; i < t.length; i++) b[o + i] = t.charCodeAt(i); }
+    str(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true);
+    dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); str(36, 'data'); dv.setUint32(40, n * 2, true);
+    for (var i = 0; i < n; i++) dv.setInt16(44 + i * 2, Math.round(Math.sin(2 * Math.PI * f * i / rate) * 32000 * v), true);
+    var bin = '';
+    for (var j = 0; j < b.length; j++) bin += String.fromCharCode(b[j]);
+    return 'data:audio/wav;base64,' + btoa(bin);
+  }
+  function sound(d) {
+    if (typeof d.snd !== 'number') return;
+    if (lastSnd === null) { lastSnd = d.snd; return; }
+    if (d.snd === lastSnd) return;
+    lastSnd = d.snd;
+    var p = String(d.sndp || '').split(','), kind = p[0], f = +p[1] || 440, ms = +p[2] || 1500, v = +p[3] || 0.3;
+    try {
+      if (kind === 'osc') {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) { tell('osc: no AudioContext'); return; }
+        if (!actx) actx = new AC();
+        if (actx.resume) actx.resume();
+        var o = actx.createOscillator(), g = actx.createGain();
+        o.frequency.value = f; g.gain.value = v; o.connect(g); out(actx, g);
+        o.start();
+        tell('osc started, state=' + actx.state + ' rate=' + actx.sampleRate);
+        setTimeout(function () {
+          try { o.stop(); } catch (e) {}
+          tell('osc stopped, state=' + actx.state + ' played=' + actx.currentTime.toFixed(2) + 's');
+        }, ms);
+      } else if (kind === 'tag') {
+        var a = new Audio(wavUri(f, ms, v));
+        a.onplaying = function () { tell('tag playing'); };
+        a.onended = function () { tell('tag ended'); };
+        a.onerror = function () { tell('tag error ' + (a.error ? a.error.code : '?')); };
+        var pr = a.play();
+        if (pr && pr.catch) pr.catch(function (e) { tell('tag refused: ' + e.name); });
+      } else if (kind === 'tts') {
+        if (!window.speechSynthesis) { tell('tts: no speechSynthesis'); return; }
+        var vs = speechSynthesis.getVoices(), names = [];
+        for (var i = 0; i < vs.length; i++) names.push(vs[i].lang + ':' + vs[i].name);
+        var u = new SpeechSynthesisUtterance('Merhaba, bu bir ses denemesidir.');
+        u.lang = 'tr-TR'; u.volume = v;
+        u.onstart = function () { tell('tts started'); };
+        u.onend = function () { tell('tts ended'); };
+        u.onerror = function (e) { tell('tts error ' + (e.error || '')); };
+        speechSynthesis.speak(u);
+        tell('tts voices ' + vs.length + ': ' + names.slice(0, 12).join(' | '));
+      } else if (kind === 'vol') {
+        tell('volume=' + tizen.tvaudiocontrol.getVolume() + ' mute=' + tizen.tvaudiocontrol.isMute() + ' output=' + tizen.tvaudiocontrol.getOutputMode());
+      }
+    } catch (e) { tell(kind + ' error ' + e.name + ': ' + e.message); }
+  }
+
+  // Spoken translation: when the service has a new spoken line, fetch it and play it over the
+  // game sound. One line may wait behind the one being spoken; a newer line takes the place
+  // of an older one that is still waiting.
+  var lastA = null, playing = null, waiting = null;
+  function audio() {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    if (!actx) actx = new AC();
+    if (actx.resume) actx.resume();
+    return actx;
+  }
+  // Our voice goes to the right channel only when the service asks for it (d.pan): it then
+  // listens to the game on the left channel and never hears us.
+  var panRight = false;
+  function out(c, node) {
+    if (panRight) {
+      try {
+        if (c.createStereoPanner) {
+          var sp = c.createStereoPanner(); sp.pan.value = 1; node.connect(sp); sp.connect(c.destination); return;
+        }
+        var m = c.createChannelMerger(2); node.connect(m, 0, 1); m.connect(c.destination); return;
+      } catch (e) { tell('pan failed: ' + e); }
+    }
+    node.connect(c.destination);
+  }
+  // Clips are played strictly in the order of their numbers, each starting exactly where the
+  // one before ends: a line can arrive in pieces, and the pieces must join without a gap.
+  var clips = {}, nextN = null, nextAt = 0;
+  function speech(d) {
+    panRight = d.pan === 1;
+    if (typeof d.aseq !== 'number') return;
+    if (lastA === null || d.aseq < lastA) { lastA = d.aseq; nextN = d.aseq + 1; clips = {}; return; }
+    if (d.aseq === lastA) return;
+    var from = Math.max(lastA + 1, d.aseq - 11);
+    // Only numbers that were never asked for are given up here. (Counting from nextN gave up
+    // clips that were still on their way, so the piece before the last one was often lost.)
+    for (var m = lastA + 1; m < from; m++) clips[m] = null;
+    lastA = d.aseq;
+    for (var n = from; n <= d.aseq; n++) fetchClip(n);
+  }
+  function fetchClip(n, again) {
+    var t0 = Date.now(), x = new XMLHttpRequest();
+    // One more try before a piece is given up: a missing piece is a hole in the line.
+    function skip() {
+      if (!again) { fetchClip(n, true); return; }
+      tell('speech ' + n + ': could not be fetched, skipped');
+      clips[n] = null; pump();
+    }
+    x.open('GET', SERVICE + '/speech.wav?n=' + n + '&t=' + t0);
+    x.responseType = 'arraybuffer';
+    x.timeout = 3000;
+    x.onerror = skip; x.ontimeout = skip;
+    x.onload = function () {
+      var c = audio();
+      if (x.status !== 200 || !c) { skip(); return; }
+      c.decodeAudioData(x.response, function (buf) { clips[n] = { buf: buf, t0: t0 }; pump(); },
+        function () { tell('speech ' + n + ': could not decode'); skip(); });
+    };
+    x.send();
+  }
+  function pump() {
+    var c = audio();
+    if (!c) return;
+    while (nextN in clips) {
+      var e = clips[nextN];
+      delete clips[nextN];
+      if (e) {
+        var src = c.createBufferSource();
+        src.buffer = e.buf;
+        out(c, src);
+        var at = Math.max(c.currentTime + 0.03, nextAt);
+        src.start(at);
+        nextAt = at + e.buf.duration;
+        tell('speech ' + nextN + ': ' + e.buf.duration.toFixed(2) + ' s, starts in ' + Math.round((at - c.currentTime) * 1000) +
+          ' ms, ' + (Date.now() - e.t0) + ' ms after it was announced');
+      }
+      nextN++;
+    }
+  }
+
+  // 2) Wait on the service and draw the Turkish line over the English one.
+  var shownLine = -1, boxW = 0, boxH = 0, lastData = null, sizes = [];
+  try {
+    var saved = (localStorage.getItem('sizes') || '').split(',');
+    for (var si = 0; si < saved.length; si++) if (parseFloat(saved[si]) > 0) sizes.push(parseFloat(saved[si]));
+  } catch (e) {}
+  function render(d) {
+    lastData = d;
+    if (hudOn) hud.textContent = d.status + ' · ' + (d.lat || 0) + ' ms · satır ' + d.calls + ' · kare ' + (d.step || 0) + ' ms';
+    if (d.seq === lastSeq) return;
+    lastSeq = d.seq;
+    // Hiding: drop only "on" and keep the look (s1/s2) while the line fades out. Falling
+    // back to the default look here made the black box flash up during the fade.
+    // d.cov: a new English line has just appeared and its translation is on the way. Its
+    // place is covered at once (patch or box, no text yet) so the English is not read first.
+    var covering = !d.tr && d.cov;
+    if ((!d.tr && !covering) || hidden) { sub.className = sub.className.replace(/\bon\b\s*/, ''); shownLine = -1; return; }
+    var sx = 1920 / d.fw, sy = 1080 / d.fh;
+    var x = d.x * sx, y = d.y * sy, w = d.w * sx, h = d.h * sy;
+    var boxed = !d.style;      // the black box look; the others draw straight onto the scene
+    var same = !covering && d.line === shownLine && sub.className.indexOf('on') === 0;
+    shownLine = covering ? -1 : d.line;
+
+    // The rectangle from the service is the English text plus a margin (10 px left and
+    // right, 5 above, 6 below, in capture pixels). The translation is set in the same
+    // letter size as the English and kept inside that rectangle.
+    var MY = 11 * sy;
+    // d.r: one rectangle per English text line (x, y, w, h in capture pixels).
+    var rects = d.r && d.r.length >= 4 ? d.r : [d.x, d.y, d.w, d.h];
+    var n = rects.length >> 2;
+    // A game uses one subtitle size, but a single rectangle is a rough measure of it (a line
+    // without tall or hanging letters comes out lower). So the size is taken from the
+    // recent one-line rectangles, near their upper end, and stays steady from line to line.
+    var est = (rects[3] * sy - MY) / 0.92;
+    if (n === 1 && est >= 14 && est <= 60) {
+      sizes.push(est); if (sizes.length > 15) sizes.shift();
+      try { localStorage.setItem('sizes', sizes.join(',')); } catch (e) {}
+    }
+    var sorted = sizes.slice().sort(function (a, b) { return a - b; });
+    var ref = sorted.length ? sorted[Math.floor((sorted.length - 1) * 0.75)] : 0;
+    var fs = Math.max(16, Math.min(46, ref ? Math.min(ref, est * 1.3) : est));
+    // With several lines, each Turkish line sits where an English line was: same distance
+    // between lines, first line on the first English line.
+    var mid0 = (rects[1] + rects[3] / 2) * sy, pitch = 0;
+    if (n > 1) pitch = Math.max(fs * 1.1, ((rects[5] + rects[7] / 2) * sy - mid0));
+    text.style.lineHeight = n > 1 ? pitch + 'px' : '1.25';
+    var html = d.tr.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>')
+      .replace(/^([A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ .'-]{1,24}:)/gm, '<span class="name">$1</span>');
+    text.innerHTML = html;
+    text.style.webkitTransform = text.style.transform = 'none';
+    text.style.fontSize = fs + 'px';
+    var avail = w - 12;
+    if (n > 1) {
+      // Several English lines: wrap inside the same width, shrink until it fits the height.
+      text.style.whiteSpace = 'normal'; text.style.maxWidth = avail + 'px';
+      for (var i = 0; i < 6 && text.offsetHeight > n * pitch + 1; i++) { fs *= 0.93; text.style.fontSize = fs + 'px'; }
+    } else {
+      // One English line: stay on one line. Turkish is often longer, so first make the
+      // letters a little smaller (to 80%), then a little narrower (to 88%). Past that the
+      // text is allowed to run over the ends rather than become too small to read.
+      text.style.whiteSpace = 'nowrap'; text.style.maxWidth = 'none';
+      var nat = text.offsetWidth;
+      if (nat > avail) {
+        fs *= Math.max(0.8, avail / nat); text.style.fontSize = fs + 'px';
+        nat = text.offsetWidth;
+        if (nat > avail) text.style.webkitTransform = text.style.transform = 'scaleX(' + Math.max(0.88, avail / nat).toFixed(3) + ')';
+      }
+    }
+
+    var cx = Math.max(80, Math.min(1840, x + w / 2));
+    sub.style.left = cx + 'px';
+    sub.style.bottom = Math.max(0, 1080 - (y + h)) + 'px';
+    if (boxed) {
+      // The box covers the English text and grows only if the Turkish needs more room;
+      // while the same line is up it never shrinks, so a corrected reading does not jump.
+      sub.style.width = ''; sub.style.height = '';
+      sub.style.minWidth = '0'; sub.style.minHeight = '0';
+      boxW = same ? Math.max(boxW, w, sub.offsetWidth) : w;
+      boxH = same ? Math.max(boxH, h, sub.offsetHeight) : h;
+      sub.style.minWidth = Math.min(1760, boxW) + 'px';
+      sub.style.minHeight = boxH + 'px';
+    } else {
+      // No box: exactly the English text's rectangle, which is all the patch fills.
+      sub.style.minWidth = sub.style.width = w + 'px';
+      sub.style.minHeight = sub.style.height = h + 'px';
+    }
+    // One line: centred in its rectangle. Several: from the top, first line on the first.
+    sub.style.webkitAlignItems = sub.style.alignItems = n > 1 ? 'flex-start' : 'center';
+    text.style.marginTop = n > 1 ? Math.round(mid0 - y - pitch / 2) + 'px' : '0';
+    sub.className = 'on' + (d.style ? ' s' + d.style : '');
+  }
+
+  // Style 2: paint the service's colour patch behind the text, but only where the English
+  // letters are: one soft-edged piece per English line, nothing in the gap between lines.
+  // The patch has one row of colours above the first line, one between each pair of lines
+  // and one below the last; a line is filled with the blend of the rows around it.
+  var lastPseq = -1, piece = document.createElement('canvas');
+  function paint(d) {
+    if (d.style !== 2 || (!d.tr && !d.cov) || !d.patch || d.pseq === lastPseq || sub.className.indexOf('on') < 0) return;
+    lastPseq = d.pseq;
+    var box = sub.getBoundingClientRect();
+    var cw = Math.round(box.width), ch = Math.round(box.height);
+    if (patch.width !== cw || patch.height !== ch) {
+      patch.width = cw; patch.height = ch; patch.style.width = cw + 'px'; patch.style.height = ch + 'px';
+    }
+    var cols = d.pc, rows = d.pr || 2, hex = d.patch;
+    if (tiny.width !== cols || tiny.height !== rows) { tiny.width = cols; tiny.height = rows; }
+    var tg = tiny.getContext('2d'), img = tg.createImageData(cols, rows), p = img.data;
+    for (var i = 0; i < cols * rows; i++) {
+      p[i * 4] = parseInt(hex.substr(i * 6, 2), 16); p[i * 4 + 1] = parseInt(hex.substr(i * 6 + 2, 2), 16);
+      p[i * 4 + 2] = parseInt(hex.substr(i * 6 + 4, 2), 16); p[i * 4 + 3] = 255;
+    }
+    tg.putImageData(img, 0, 0);
+    var g = patch.getContext('2d'), sx = 1920 / d.fw, sy = 1080 / d.fh;
+    g.clearRect(0, 0, cw, ch);
+    var rects = d.r && d.r.length >= 4 ? d.r : [d.x, d.y, d.w, d.h];
+    for (var k = 0; k + 3 < rects.length; k += 4) {
+      var rw = Math.round(rects[k + 2] * sx), rh = Math.round(rects[k + 3] * sy);
+      var rx = rects[k] * sx, ry = rects[k + 1] * sy;
+      if (rw < 2 || rh < 2) continue;
+      piece.width = rw; piece.height = rh;      // also clears it
+      var q = piece.getContext('2d');
+      q.imageSmoothingEnabled = true; q.imageSmoothingQuality = 'high';
+      q.drawImage(tiny, 0, Math.min(k >> 2, rows - 2), cols, 2, d.px * sx - rx, 0, d.pw * sx, rh);
+      // Fade the edges out inside the margin around the letters, so nothing spills outside
+      // the rectangle and the letters themselves stay fully covered.
+      q.globalCompositeOperation = 'destination-in';
+      var h = q.createLinearGradient(0, 0, rw, 0), fx = Math.min(0.3, 16 / rw);
+      h.addColorStop(0, 'rgba(0,0,0,0)'); h.addColorStop(fx, '#000'); h.addColorStop(1 - fx, '#000'); h.addColorStop(1, 'rgba(0,0,0,0)');
+      q.fillStyle = h; q.fillRect(0, 0, rw, rh);
+      var v = q.createLinearGradient(0, 0, 0, rh), fy = Math.min(0.3, 7 / rh);
+      v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(fy, '#000'); v.addColorStop(1 - fy, '#000'); v.addColorStop(1, 'rgba(0,0,0,0)');
+      q.fillStyle = v; q.fillRect(0, 0, rw, rh);
+      g.drawImage(piece, Math.round(rx - box.left), Math.round(ry - box.top));
+    }
+  }
+
+  function addOwnIp(done) {
+    var left = 2;
+    function fin() { if (--left === 0) done(); }
+    ['WIFI_NETWORK', 'ETHERNET_NETWORK'].forEach(function (prop) {
+      try {
+        tizen.systeminfo.getPropertyValue(prop, function (n) {
+          if (n && n.ipAddress && n.ipAddress !== '0.0.0.0') {
+            var u = 'http://' + n.ipAddress + ':8090';
+            if (CANDIDATES.indexOf(u) < 0) CANDIDATES.splice(2, 0, u);
+          }
+          fin();
+        }, function () { fin(); });
+      } catch (e) { fin(); }
+    });
+  }
+
+  function probe(i) {
+    if (i >= CANDIDATES.length) {
+      hud.style.display = 'block'; hudOn = true;
+      hud.textContent = 'servise ulaşılamıyor: ' + tries.join(' | ');
+      tries = []; setTimeout(function () { probe(0); }, 3000); return;
+    }
+    var xhr = new XMLHttpRequest();
+    var url = CANDIDATES[i];
+    try { xhr.open('GET', url + '/subtitle?t=' + Date.now()); } catch (e) { tries.push(url + ' open:' + e.message); probe(i + 1); return; }
+    xhr.timeout = 1500;
+    xhr.onload = function () {
+      if (xhr.status === 200) { SERVICE = url; report(); poll(); }
+      else { tries.push(url + ' status ' + xhr.status); probe(i + 1); }
+    };
+    xhr.onerror = function () { tries.push(url + ' error'); probe(i + 1); };
+    xhr.ontimeout = function () { tries.push(url + ' timeout'); probe(i + 1); };
+    try { xhr.send(); } catch (e) { tries.push(url + ' send:' + e.message); probe(i + 1); }
+  }
+
+  // Long poll: the service answers the moment the subtitle changes, so there is no
+  // polling delay; it answers anyway after `wait` ms, which also tells it we are alive.
+  var fails = 0;
+  function poll() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', SERVICE + '/subtitle?seq=' + lastSeq + '&pseq=' + lastPseq + '&wait=' + (hudOn ? 300 : 900) + '&t=' + Date.now());
+    xhr.timeout = 5000;
+    xhr.onload = function () {
+      fails = 0;
+      var ok = false;
+      try { var d = JSON.parse(xhr.responseText); render(d); paint(d); follow(d); sound(d); speech(d); ok = true; } catch (e) {}
+      setTimeout(poll, ok ? 0 : 200);
+    };
+    xhr.onerror = xhr.ontimeout = function () {
+      if (hudOn) hud.textContent = 'servis yanıt vermiyor (' + SERVICE + ')';
+      if (++fails >= 5) { fails = 0; SERVICE = null; probe(0); } else setTimeout(poll, 500);
+    };
+    xhr.send();
+  }
+
+  // 3) Remote keys: Back exits, Red toggles the info line, Green hides/shows subtitles.
+  try { tizen.tvinputdevice.registerKey('ColorF0Red'); tizen.tvinputdevice.registerKey('ColorF1Green'); } catch (e) {}
+  document.addEventListener('keydown', function (e) {
+    if (e.keyCode === 10009) { try { tizen.tvwindow.hide(function () {}, null, 'MAIN'); } catch (x) {} tizen.application.getCurrentApplication().exit(); }
+    else if (e.keyCode === 403) { hudOn = !hudOn; hud.style.display = hudOn ? 'block' : 'none'; }
+    else if (e.keyCode === 404) {
+      hidden = !hidden; say(hidden ? 'Altyazı gizlendi' : 'Altyazı açık', 1500);
+      if (lastData) { var s = lastSeq; lastSeq = -1; render(lastData); lastSeq = s; }
+    }
+  });
+
+  showHdmi();
+  addOwnIp(function () { probe(0); });
+  // A console plugged in or switched on later shows up in the phone app within a minute.
+  setInterval(function () { listSources(report); }, 60000);
+})();
+</script>
+</body>
+</html>

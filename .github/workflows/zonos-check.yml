@@ -1,0 +1,47 @@
+name: ZONOS check
+
+# Experiment: speaks the same Turkish lines twice on the build machine's CPU with the phone-sized model files:
+# through our small bridge (Zonos/, what the iPhone app does today) and through ZONOS3-Mini's own server, which adds
+# text preparation, short-line handling and the alignment guard. The WAV files are compared by ear.
+on:
+  push:
+    paths:
+      - 'Zonos/trunc_check.py'
+      - '.github/workflows/zonos-check.yml'
+  workflow_dispatch:
+
+jobs:
+  speak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: ZONOS3-Mini source (pinned)
+        run: |
+          git clone https://github.com/Zyphra/ZONOS3-Mini zonos-src
+          cd zonos-src
+          git checkout a50e14117d99181ba7f28047b451ba03ba1a09a9
+          git submodule update --init --depth 1 servers/ggml/ggml third_party/zyphra-textnorm
+      - name: Build (our bridge and the model's own server)
+        run: |
+          cmake -S Zonos -B build -DCMAKE_BUILD_TYPE=Release -DZONOS_SRC=$PWD/zonos-src
+          cmake --build build --target zb-serve -j4
+      - name: Model files
+        run: |
+          mkdir -p models
+          for f in backbone-ptq-edit.gguf zac-keep2.gguf; do
+            curl -L --fail --retry 3 -sS -o models/$f https://huggingface.co/Zyphra/ZONOS3-Mini/resolve/main/gguf/$f
+          done
+          ls -l models
+      - name: Lines that lose their end, without and with the alignment guard
+        run: |
+          curl -L --fail --retry 3 -sS -o models/spk-encoder.gguf https://huggingface.co/Zyphra/ZONOS3-Mini/resolve/main/gguf/spk-encoder.gguf
+          ./build/zb-serve models/backbone-ptq-edit.gguf models/zac-keep2.gguf TRAltyazi/Voices/zonos3_mini_heads_tr.json port.txt > server.log 2>&1 &
+          for i in $(seq 1 180); do [ -s port.txt ] && break; sleep 1; done
+          [ -s port.txt ] || { tail -40 server.log; exit 1; }
+          python3 Zonos/trunc_check.py http://127.0.0.1:$(cat port.txt) TRAltyazi/Voices
+          mkdir -p out && echo ok > out/short.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turkce-ses-ornekleri
+          path: out/*

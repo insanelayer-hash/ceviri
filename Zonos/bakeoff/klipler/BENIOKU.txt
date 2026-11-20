@@ -1,0 +1,4 @@
+Bu klasore kendi karakter kliplerinizi koyun: karakter1.wav, karakter3.wav, karakter6.wav
+(16 kHz, tek kanal, 16 bit; bilgisayardaki program oyun sirasinda bu bicimde kaydeder).
+
+Klipler projeyle birlikte dagitilmaz: oyundan alinan sesler oyunun sahibine aittir.

@@ -1,0 +1,3 @@
+The .npy files here are speaker vectors of default voices shipped with ZONOS3-Mini
+(github.com/Zyphra/ZONOS3-Mini, assets/default_voices, MIT License, Copyright Zyphra).
+zonos3_mini_heads_tr.json is the Turkish alignment file of the same project (assets/laci_heads).
