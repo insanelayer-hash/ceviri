@@ -288,6 +288,35 @@
     var saved = (localStorage.getItem('sizes') || '').split(',');
     for (var si = 0; si < saved.length; si++) if (parseFloat(saved[si]) > 0) sizes.push(parseFloat(saved[si]));
   } catch (e) {}
+  // The Turkish text in as many lines as the English has (one rectangle per English line in `rects`).
+  // Each Turkish line gets about the same share of the letters as its English line has of the width, so
+  // a long first line and a short second one stay that way. One English line: one Turkish line. Fewer
+  // words than lines: a word a line.
+  function splitLike(tr, rects, n) {
+    var given = tr.split('\n');
+    if (n <= 1) return [given.join(' ')];
+    if (given.length === n) return given;
+    var words = given.join(' ').split(/\s+/), i, k;
+    for (i = words.length - 1; i >= 0; i--) if (!words[i]) words.splice(i, 1);
+    if (words.length <= n) return words.length ? words : [tr];
+    var total = 0, len = 0;
+    for (k = 0; k < n; k++) total += Math.max(1, rects[k * 4 + 2]);
+    for (i = 0; i < words.length; i++) len += words[i].length + 1;
+    var out = [], at = 0, acc = 0, used = 0;
+    for (k = 0; k < n - 1; k++) {
+      acc += Math.max(1, rects[k * 4 + 2]);
+      var target = len * acc / total, line = [], keep = n - 1 - k;   // keep: words the later lines need
+      while (at < words.length - keep) {
+        var next = used + words[at].length + 1;
+        if (line.length && Math.abs(next - target) > Math.abs(used - target)) break;
+        line.push(words[at]); used = next; at++;
+      }
+      out.push(line.join(' '));
+    }
+    out.push(words.slice(at).join(' '));
+    return out;
+  }
+
   function render(d) {
     lastData = d;
     if (hudOn) hud.textContent = d.status + ' · ' + (d.lat || 0) + ' ms · satır ' + d.calls + ' · kare ' + (d.step || 0) + ' ms';
@@ -328,16 +357,30 @@
     var mid0 = (rects[1] + rects[3] / 2) * sy, pitch = 0;
     if (n > 1) pitch = Math.max(fs * 1.1, ((rects[5] + rects[7] / 2) * sy - mid0));
     text.style.lineHeight = n > 1 ? pitch + 'px' : '1.25';
-    var html = d.tr.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>')
-      .replace(/^([A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ .'-]{1,24}:)/gm, '<span class="name">$1</span>');
+    // As many Turkish lines as there are English ones, each taking its English line's place.
+    var parts = splitLike(d.tr, rects, n), html = '';
+    for (var li = 0; li < parts.length; li++) {
+      var one = parts[li].replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/^([A-ZÇĞİÖŞÜ][A-ZÇĞİÖŞÜ .'-]{1,24}:)/, '<span class="name">$1</span>');
+      // d.tc: the colour the game draws this subtitle in (one for all lines, or one per line).
+      var tc = d.tc instanceof Array ? d.tc[Math.min(li, d.tc.length - 1)] : d.tc;
+      if (tc && /^[0-9a-f]{6}$/i.test(tc)) one = '<span style="color:#' + tc + '">' + one + '</span>';
+      html += (li ? '<br>' : '') + one;
+    }
     text.innerHTML = html;
     text.style.webkitTransform = text.style.transform = 'none';
     text.style.fontSize = fs + 'px';
     var avail = w - 12;
     if (n > 1) {
-      // Several English lines: wrap inside the same width, shrink until it fits the height.
-      text.style.whiteSpace = 'normal'; text.style.maxWidth = avail + 'px';
-      for (var i = 0; i < 6 && text.offsetHeight > n * pitch + 1; i++) { fs *= 0.93; text.style.fontSize = fs + 'px'; }
+      // Several English lines: the breaks are ours, so no wrapping. A line that is too long makes the
+      // letters smaller (to 75%), then a little narrower (to 85%); past that it runs over the ends.
+      text.style.whiteSpace = 'nowrap'; text.style.maxWidth = 'none';
+      var natN = text.offsetWidth;
+      if (natN > avail) {
+        fs *= Math.max(0.75, avail / natN); text.style.fontSize = fs + 'px';
+        natN = text.offsetWidth;
+        if (natN > avail) text.style.webkitTransform = text.style.transform = 'scaleX(' + Math.max(0.85, avail / natN).toFixed(3) + ')';
+      }
     } else {
       // One English line: stay on one line. Turkish is often longer, so first make the
       // letters a little smaller (to 80%), then a little narrower (to 88%). Past that the
