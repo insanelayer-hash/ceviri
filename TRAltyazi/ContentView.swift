@@ -35,6 +35,10 @@ struct ContentView: View {
     @State private var zonosNote = ""
     @State private var zonosBusy = false
     @State private var player: AVAudioPlayer?
+    @AppStorage("tableURL") private var tableURL = ""
+    @State private var tableLines = SubtitleTable.shared.lines
+    @State private var tableNote = ""
+    @State private var tableBusy = false
     @State private var dark = false
     @State private var savedBrightness: CGFloat = 0.5
     @Environment(\.scenePhase) private var scenePhase
@@ -184,6 +188,8 @@ struct ContentView: View {
                     Text("Hızlı: Apple Çeviri, anında. Doğal: Apple Intelligence, günlük konuşma Türkçesi, biraz daha yavaş. Hızlı + doğal: önce hızlı çeviri görünür, doğal olanı gelince onunla değişir.")
                 }
 
+                tableSection
+
                 // Only when there is a choice to make: more than one device on the TV's HDMI inputs.
                 if worker.inputs.count > 1 {
                     Section {
@@ -245,6 +251,7 @@ struct ContentView: View {
                     LabeledContent("Doğal çeviri", value: "\(worker.lastNaturalMs) ms")
                     LabeledContent("Satır", value: "\(worker.done)")
                     LabeledContent("Hafızadan", value: "\(worker.cacheHits)")
+                    LabeledContent("Tablodan", value: "\(worker.tableHits)")
                 }
 
                 if !worker.lastEN.isEmpty {
@@ -310,6 +317,62 @@ struct ContentView: View {
         configuration = TranslationSession.Configuration(
             source: Locale.Language(identifier: "en"),
             target: Locale.Language(identifier: "tr"))
+    }
+
+    /// The ready-made translation table: one file, downloaded once from an address on the home
+    /// network (for example a computer that serves it for a minute).
+    private var tableSection: some View {
+        Section {
+            LabeledContent("Tablo", value: tableLines > 0 ? "\(tableLines) satır yüklü" : "Yüklü değil")
+            TextField("http://bilgisayarın-adresi:8123/tablo.trat", text: $tableURL)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button(tableBusy ? "İndiriliyor…" : "Tabloyu indir") { downloadTable() }
+                .disabled(tableBusy || tableURL.trimmingCharacters(in: .whitespaces).isEmpty)
+            if tableLines > 0 {
+                Button("Tabloyu sil", role: .destructive) {
+                    SubtitleTable.shared.delete()
+                    tableLines = SubtitleTable.shared.lines
+                    tableNote = ""
+                }
+            }
+            if !tableNote.isEmpty {
+                Text(tableNote).font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Hazır çeviri tablosu")
+        } footer: {
+            Text("Oyunun altyazıları önceden çevrilmişse, tablodaki satır hiç çeviri beklemeden gösterilir; tabloda olmayan satır yukarıdaki yolla çevrilir. Tablo dosyası bir kez indirilir ve telefonda kalır.")
+        }
+    }
+
+    private func downloadTable() {
+        guard let url = URL(string: tableURL.trimmingCharacters(in: .whitespaces)), url.scheme != nil else {
+            tableNote = "Adres geçersiz."
+            return
+        }
+        tableBusy = true
+        tableNote = ""
+        Task {
+            do {
+                let (temp, response) = try await URLSession.shared.download(from: url)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+                let target = SubtitleTable.fileURL
+                try? FileManager.default.removeItem(at: target)
+                try FileManager.default.moveItem(at: temp, to: target)
+                if SubtitleTable.shared.load() {
+                    tableNote = "Tablo yüklendi."
+                } else {
+                    try? FileManager.default.removeItem(at: target)
+                    tableNote = "İnen dosya tablo biçiminde değil."
+                }
+            } catch {
+                tableNote = "İndirilemedi: \(error.localizedDescription)"
+            }
+            tableLines = SubtitleTable.shared.lines
+            tableBusy = false
+        }
     }
 
     private func downloadZonos() {

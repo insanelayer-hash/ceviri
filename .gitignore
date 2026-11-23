@@ -8,3 +8,4 @@ __pycache__/
 *.pyc
 Zonos/bakeoff/klipler/*.wav
 DEVIR.md
+*.trat

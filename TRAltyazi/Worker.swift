@@ -54,6 +54,7 @@ final class Worker: ObservableObject {
     @Published var lastNaturalMs = 0
     @Published var done = 0
     @Published var cacheHits = 0
+    @Published var tableHits = 0
     @Published var running = false
     /// HDMI inputs with a device on them, as the TV reports them, the input it is showing,
     /// and the chosen one (0 = let the TV decide).
@@ -417,6 +418,17 @@ final class Worker: ObservableObject {
             let id = job.id
             voiceTasks[id] = Task { await self.heardVoice(id: id) }
             if voiceTasks.count > 40 { voiceTasks = voiceTasks.filter { $0.key > id - 20 } }
+        }
+
+        // A ready-made Turkish line for this English line (the table the user loaded): nothing
+        // to translate, it goes to the TV as soon as the line is read.
+        if let ready = SubtitleTable.shared.lookup(en) {
+            tableHits += 1
+            lastTranslateMs = 0
+            lastTR = ready; lastNatural = ready
+            remember(en, ready)
+            await post(id: job.id, tr: ready, en: en, ocrMs: ocrMs, tlMs: 0, final: true)
+            return
         }
 
         let useNatural = quality != .fast && aiReady
