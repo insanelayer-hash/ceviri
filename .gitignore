@@ -9,3 +9,5 @@ __pycache__/
 Zonos/bakeoff/klipler/*.wav
 DEVIR.md
 *.trat
+*.trsx
+*.trsd

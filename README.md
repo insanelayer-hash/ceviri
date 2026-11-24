@@ -14,6 +14,16 @@ tabloda olmayan satır her zamanki gibi çevrilir. Tablo tek bir dosyadır (`tab
 bölümüne dosyanın ev ağınızdaki adresi yazılıp bir kez indirilir. Bu depoda tablo yoktur; kendi tablonuzu siz
 üretirsiniz.
 
+## Hazır dublaj (isteğe bağlı)
+
+Bir oyunun repliklerini önceden Türkçe seslendirdiyseniz, uygulama satırı ekranda görür görmez o satırın hazır sesini
+telefonun deposundan okuyup TV'ye yollar; ses üretilmez, bilgisayar gerekmez. Paket bir dizin (`ses.trsx`: İngilizce
+satırın özeti → ses, sahne bilgisiyle) ve 64 MB'lik ses dosyalarından (`ses-000.trsd`…, MP3) oluşur; biçimi
+`TRAltyazi/DubPack.swift` başında yazılı. Uygulamadaki "Hazır dublaj" bölümüne paketin bulunduğu klasörün ev
+ağınızdaki adresi yazılıp bir kez indirilir; yarıda kesilen indirme kaldığı yerden sürer. Aynı cümle birkaç sahnede
+geçiyorsa son satırların sahnesindeki ses seçilir. Hazır satırlar TV'de sıraya girmez: yeni satır, önceki bitmeden
+başlar (TV arayüzü 0.12.0 ve sonrası). Bu depoda ses paketi yoktur; kendi paketinizi siz üretirsiniz.
+
 ## Sesli çeviri: deneysel, kurmayın
 
 Bu depodaki sesli çeviri (Türkçe seslendirme) kısmı **deneyseldir** ve **kurulmamalıdır**. Kullanılacak olan

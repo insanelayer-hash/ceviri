@@ -257,10 +257,34 @@
     x.onload = function () {
       var c = audio();
       if (x.status !== 200 || !c) { skip(); return; }
-      c.decodeAudioData(x.response, function (buf) { clips[n] = { buf: buf, t0: t0 }; pump(); },
-        function () { tell('speech ' + n + ': could not decode'); skip(); });
+      var over = readyMade(x.response);
+      c.decodeAudioData(x.response, function (buf) {
+        if (over) {
+          // A ready-made line starts at once, over whatever is being said: it keeps out of the
+          // queue, and the queue goes on as if this number had nothing in it.
+          var src = c.createBufferSource();
+          src.buffer = buf;
+          out(c, src);
+          src.start(c.currentTime + 0.02);
+          tell('speech ' + n + ': ' + buf.duration.toFixed(2) + ' s, ready-made, started ' + (Date.now() - t0) + ' ms after it was announced');
+          clips[n] = null; pump();
+          return;
+        }
+        clips[n] = { buf: buf, t0: t0 }; pump();
+      }, function () { tell('speech ' + n + ': could not decode'); skip(); });
     };
     x.send();
+  }
+  // The phone marks a ready-made line (a sound it had in store, not one it produced) with eight
+  // samples nobody can hear at the start: 1, -1, 2, -2, 3, -3, 5, -5. Such lines are the game's
+  // own dialogue, where two people may talk at once, so they are not queued.
+  function readyMade(wav) {
+    try {
+      if (!wav || wav.byteLength < 60) return false;
+      var dv = new DataView(wav), want = [1, -1, 2, -2, 3, -3, 5, -5];
+      for (var i = 0; i < want.length; i++) if (dv.getInt16(44 + i * 2, true) !== want[i]) return false;
+      return true;
+    } catch (e) { return false; }
   }
   function pump() {
     var c = audio();

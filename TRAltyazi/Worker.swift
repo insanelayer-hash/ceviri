@@ -55,6 +55,8 @@ final class Worker: ObservableObject {
     @Published var done = 0
     @Published var cacheHits = 0
     @Published var tableHits = 0
+    @Published var dubHits = 0
+    @Published var dubNote = ""
     @Published var running = false
     /// HDMI inputs with a device on them, as the TV reports them, the input it is showing,
     /// and the chosen one (0 = let the TV decide).
@@ -72,6 +74,9 @@ final class Worker: ObservableObject {
     var fastReading = false
     /// Spoken translation: each Turkish line is also turned into sound and sent to the TV.
     var voiceOn = false
+    /// Ready-made spoken lines (`DubPack`): a line that is in the pack is said with its own
+    /// sound from the phone's storage, at once, also while another line is still being said.
+    var dubOn = false
     /// Which voice says the lines: 0 = the phone's own, 1 = ZONOS3-Mini (when downloaded),
     /// 2 = ElevenLabs (over the internet, with the user's own key).
     var voiceEngine = 0
@@ -321,7 +326,7 @@ final class Worker: ObservableObject {
     private func pollLoop() async {
         let device = UIDeviceName.current
         while !Task.isCancelled && !stopRequested {
-            guard let url = URL(string: "http://\(host):8090/job?k=\(key)&wait=8000&fmt=raw&dev=\(device)&voice=\(voiceOn ? 1 : 0)") else {
+            guard let url = URL(string: "http://\(host):8090/job?k=\(key)&wait=8000&fmt=raw&dev=\(device)&voice=\(voiceOn || dubOn ? 1 : 0)") else {
                 status = "TV adresi geçersiz"
                 return
             }
@@ -418,6 +423,24 @@ final class Worker: ObservableObject {
             let id = job.id
             voiceTasks[id] = Task { await self.heardVoice(id: id) }
             if voiceTasks.count > 40 { voiceTasks = voiceTasks.filter { $0.key > id - 20 } }
+        }
+
+        // A ready-made sound for this English line (the pack the user loaded): it goes to the TV
+        // together with its Turkish text as soon as the line is read. The text is the one the
+        // sound says; where a piece has none of its own, the table's.
+        if dubOn, let match = DubPack.shared.find(en), let shown = match.text ?? SubtitleTable.shared.lookup(en) {
+            let sounds = DubPack.shared.claim(match)
+            if !sounds.isEmpty {
+                dubHits += 1
+                let id = job.id
+                Task { await self.sendDub(sounds, id: id, readAt: t0) }
+            }
+            tableHits += 1
+            lastTranslateMs = 0
+            lastTR = shown; lastNatural = shown
+            remember(en, shown)
+            await post(id: job.id, tr: shown, en: en, ocrMs: ocrMs, tlMs: 0, final: true, spoken: true)
+            return
         }
 
         // A ready-made Turkish line for this English line (the table the user loaded): nothing
@@ -1039,11 +1062,30 @@ final class Worker: ObservableObject {
         return true
     }
 
-    private func post(id: Int, tr: String, en: String, ocrMs: Int, tlMs: Int, final: Bool) async {
+    /// Reads a ready-made line from the phone's storage and hands it to the TV. Nothing waits
+    /// for a line that is still being said: the TV plays ready-made lines over each other.
+    private func sendDub(_ sounds: [DubPack.Entry], id: Int, readAt: Date) async {
+        let clip = await Task.detached(priority: .userInitiated) { DubPack.shared.clip(sounds) }.value
+        guard let clip else {
+            dubNote = "Ses okunamadı"
+            note("dub \(id): the sound could not be read")
+            return
+        }
+        let readyMs = Int(Date().timeIntervalSince(readAt) * 1000)
+        let taken = await send(clip, id: id)
+        let sentMs = Int(Date().timeIntervalSince(readAt) * 1000)
+        let seconds = Double(clip.pcm.count / 2) / Double(max(clip.rate, 1))
+        dubNote = String(format: "%.1f sn ses · %d ms'de hazır · %d ms'de TV'de", seconds, readyMs, sentMs) + (taken ? "" : " · TV almadı")
+        note(String(format: "dub %d: %.1f s of sound, ready %d ms and at the TV %d ms after the line came to the phone%@",
+                    id, seconds, readyMs, sentMs, taken ? "" : " (refused)"))
+    }
+
+    /// `spoken`: the line has its voice already (a ready-made sound), so none is produced for it.
+    private func post(id: Int, tr: String, en: String, ocrMs: Int, tlMs: Int, final: Bool, spoken: Bool = false) async {
         if !tr.isEmpty {
             subtitleSeen.append((Self.words(en), Date()))
             if subtitleSeen.count > 12 { subtitleSeen.removeFirst(subtitleSeen.count - 12) }
-            speak(id: id, text: tr)
+            if !spoken { speak(id: id, text: tr) }
         }
         var c = URLComponents()
         c.scheme = "http"

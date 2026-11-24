@@ -39,6 +39,12 @@ struct ContentView: View {
     @State private var tableLines = SubtitleTable.shared.lines
     @State private var tableNote = ""
     @State private var tableBusy = false
+    @AppStorage("dubURL") private var dubURL = ""
+    @AppStorage("dub") private var dub = true
+    @State private var dubReady = DubPack.shared.ready
+    @State private var dubLines = DubPack.shared.lines
+    @State private var dubProgress: Double?
+    @State private var dubNote = ""
     @State private var dark = false
     @State private var savedBrightness: CGFloat = 0.5
     @Environment(\.scenePhase) private var scenePhase
@@ -67,6 +73,7 @@ struct ContentView: View {
             worker.voiceEngine = value
             listenIfNeeded()
         }
+        .onChange(of: dub) { _, value in worker.dubOn = value && DubPack.shared.ready }
     }
 
     private var pageWithZonos: some View {
@@ -190,6 +197,8 @@ struct ContentView: View {
 
                 tableSection
 
+                dubSection
+
                 // Only when there is a choice to make: more than one device on the TV's HDMI inputs.
                 if worker.inputs.count > 1 {
                     Section {
@@ -252,6 +261,10 @@ struct ContentView: View {
                     LabeledContent("Satır", value: "\(worker.done)")
                     LabeledContent("Hafızadan", value: "\(worker.cacheHits)")
                     LabeledContent("Tablodan", value: "\(worker.tableHits)")
+                    LabeledContent("Hazır sesten", value: "\(worker.dubHits)")
+                    if !worker.dubNote.isEmpty {
+                        Text(worker.dubNote).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
 
                 if !worker.lastEN.isEmpty {
@@ -299,6 +312,7 @@ struct ContentView: View {
         worker.look = look
         worker.fastReading = fastReading
         worker.voiceOn = voice
+        worker.dubOn = dub && DubPack.shared.ready
         worker.voiceEngine = voiceEngine
         worker.zonosVoice = zonosVoice
         worker.zonosGPU = zonosGPU
@@ -372,6 +386,87 @@ struct ContentView: View {
             }
             tableLines = SubtitleTable.shared.lines
             tableBusy = false
+        }
+    }
+
+    /// The ready-made spoken lines: an index and a row of sound files, downloaded once from a
+    /// folder address on the home network. They stay on the phone.
+    private var dubSection: some View {
+        Section {
+            LabeledContent("Sesler", value: dubState)
+            if dubReady {
+                Toggle("Hazır sesleri TV'den çal", isOn: $dub)
+            }
+            TextField("http://bilgisayarın-adresi:8124", text: $dubURL)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if let value = dubProgress {
+                ProgressView(value: value) {
+                    Text(verbatim: "İndiriliyor: %\(Int(value * 100))").font(.footnote)
+                }
+            }
+            Button(dubButton) { downloadDub() }
+                .disabled(dubProgress != nil || dubURL.trimmingCharacters(in: .whitespaces).isEmpty)
+            if dubLines > 0, dubProgress == nil {
+                Button("Sesleri sil", role: .destructive) {
+                    DubPack.shared.delete()
+                    dubReady = DubPack.shared.ready
+                    dubLines = DubPack.shared.lines
+                    worker.dubOn = false
+                    dubNote = ""
+                }
+            }
+            if !dubNote.isEmpty {
+                Text(dubNote).font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Hazır dublaj")
+        } footer: {
+            Text("Oyunun replikleri önceden Türkçe seslendirilmişse, ses paketindeki satır ekranda görünür görünmez kendi sesiyle TV'den çalınır; önceki satırın bitmesi beklenmez. Paket bir kez indirilir (birkaç GB) ve telefonda kalır; indirme yarıda kesilirse kaldığı yerden sürer. İndirirken uygulama açık kalmalı.")
+        }
+    }
+
+    private var dubState: String {
+        if dubReady { return "\(dubLines) satır yüklü" }
+        return dubLines > 0 ? "Eksik: indirme yarım kaldı" : "Yüklü değil"
+    }
+
+    private var dubButton: String {
+        if dubProgress != nil { return "İndiriliyor…" }
+        if dubReady { return "Sesleri yeniden denetle" }
+        return dubLines > 0 ? "İndirmeyi sürdür" : "Sesleri indir"
+    }
+
+    private func downloadDub() {
+        var address = dubURL.trimmingCharacters(in: .whitespaces)
+        if !address.hasSuffix("/") { address += "/" }
+        guard let url = URL(string: address), url.scheme != nil else {
+            dubNote = "Adres geçersiz."
+            return
+        }
+        dubProgress = 0
+        dubNote = ""
+        Task {
+            do {
+                try await DubPack.download(from: url) { value in
+                    Task { @MainActor in
+                        if dubProgress != nil { dubProgress = value }
+                    }
+                }
+                if DubPack.shared.ready {
+                    dubNote = String(format: "Sesler yüklendi (%.1f GB).", Double(DubPack.shared.bytes) / 1_073_741_824)
+                } else {
+                    dubNote = "İndirme tamamlanamadı."
+                }
+            } catch {
+                DubPack.shared.load()
+                dubNote = "İndirilemedi: \(error.localizedDescription) Yeniden basınca kaldığı yerden sürer."
+            }
+            dubProgress = nil
+            dubReady = DubPack.shared.ready
+            dubLines = DubPack.shared.lines
+            worker.dubOn = dub && dubReady
         }
     }
 
