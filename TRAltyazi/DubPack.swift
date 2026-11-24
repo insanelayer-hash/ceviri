@@ -150,9 +150,9 @@ final class DubPack: @unchecked Sendable {
 
     /// The sizes of the sound files an index asks for; nil when the data is not an index.
     private static func partSizes(_ d: Data) -> [Int]? {
-        guard let layout = layout(d) else { return nil }
-        let at = 24 + layout.keys * 8 + (layout.keys + 1) * 4 + layout.entries * 24
-        return (0..<layout.parts).map { Int(u32(d, at + $0 * 4)) }
+        guard let shape = Self.layout(d) else { return nil }
+        let at = 24 + shape.keys * 8 + (shape.keys + 1) * 4 + shape.entries * 24
+        return (0..<shape.parts).map { Int(u32(d, at + $0 * 4)) }
     }
 
     private static func fileSize(_ url: URL) -> Int {
