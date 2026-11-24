@@ -458,7 +458,8 @@ final class Worker: ObservableObject {
             if !sounds.isEmpty {
                 dubHits += 1
                 let id = job.id
-                Task { await self.sendDub(sounds, id: id, readAt: t0) }
+                let startAt = dubStart(sounds, shownAt: t0)
+                Task { await self.sendDub(sounds, id: id, readAt: t0, startAt: startAt) }
             }
             tableHits += 1
             lastTranslateMs = 0
@@ -1104,7 +1105,7 @@ final class Worker: ObservableObject {
             return
         }
         dubHits += 1
-        await sendDub(sounds, id: id, readAt: readAt)
+        await sendDub(sounds, id: id, readAt: readAt, startAt: dubStart(sounds, shownAt: readAt))
     }
 
     /// Keeps the TV's copy of the game's sound running (it stops two minutes after the last
@@ -1116,10 +1117,38 @@ final class Worker: ObservableObject {
         _ = try? await voiceNet.data(for: request)
     }
 
-    /// Reads a ready-made line from the phone's storage and hands it to the TV. Nothing waits
-    /// for a line that is still being said: the TV plays ready-made lines over each other.
-    private func sendDub(_ sounds: [DubPack.Entry], id: Int, readAt: Date) async {
+    // When the original voice of the last ready-made line ends in the game (as far as known),
+    // and until when its Turkish sound goes on at the TV (our estimate).
+    private var dubOriginalUntil: Date?
+    private var dubBusyUntil = Date.distantPast
+
+    /// When a ready-made line is to start. In the game two lines overlap only when two people
+    /// really talk at once: then the new line appeared while the original voice of the line
+    /// before was still going, and its Turkish sound starts at once, over the other. Otherwise
+    /// the lines follow each other in the game, and the Turkish one before (which is longer than
+    /// the original) is let finish first, for at most 0.7 s; after that the new one starts anyway.
+    private func dubStart(_ sounds: [DubPack.Entry], shownAt: Date) -> Date {
+        let now = Date()
+        var start = now
+        if let over = dubOriginalUntil, shownAt >= over.addingTimeInterval(-0.15), dubBusyUntil > now {
+            start = min(dubBusyUntil, now.addingTimeInterval(0.7))
+        }
+        let original = sounds.reduce(0.0) { $0 + $1.original }
+        let spoken = sounds.reduce(0.0) { $0 + $1.seconds }
+        dubOriginalUntil = original > 0 ? shownAt.addingTimeInterval(original) : nil
+        dubBusyUntil = max(dubBusyUntil, start.addingTimeInterval(spoken + 0.1))
+        return start
+    }
+
+    /// Reads a ready-made line from the phone's storage and hands it to the TV, at `startAt`
+    /// (see `dubStart`); the TV plays ready-made lines over each other when they overlap.
+    private func sendDub(_ sounds: [DubPack.Entry], id: Int, readAt: Date, startAt: Date) async {
         let clip = await Task.detached(priority: .userInitiated) { DubPack.shared.clip(sounds) }.value
+        let wait = startAt.timeIntervalSinceNow
+        if wait > 0.02 {
+            note(String(format: "dub %d: waits %d ms for the line before it", id, Int(wait * 1000)))
+            try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
+        }
         guard let clip else {
             dubNote = "Ses okunamadı"
             note("dub \(id): the sound could not be read")

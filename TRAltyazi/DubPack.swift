@@ -7,10 +7,11 @@ import AVFoundation
 /// pack is spoken without anything being produced: the sound is read from the phone's storage
 /// and handed to the TV. The pack holds no English text.
 ///
-/// Index layout (little-endian): "TRSS0002" | u32 keys K | u32 entries E | u32 text size |
+/// Index layout (little-endian): "TRSS0003" | u32 keys K | u32 entries E | u32 text size |
 /// u32 sound files P | K x u64 digests, sorted | (K+1) x u32 first entry of a key |
 /// E x 24-byte entry | P x u32 size of each sound file | E x u8 pitch | UTF-8 text.
-/// ("TRSS0001" is the same without the pitches.)
+/// E x u16 length of the line's original sound in 1/100 s (0 = not known) comes after the
+/// pitches. ("TRSS0002" is the same without those lengths, "TRSS0001" without the pitches too.)
 /// Pitch: how high the voice of the line's original speaker is at its start; 0 = not known,
 /// otherwise 1 + quarter semitones above 50 Hz. Filled in where a key has several sounds.
 /// Entry: u32 place in its sound file | u32 length | u32 order of the line in its table |
@@ -59,6 +60,8 @@ final class DubPack: @unchecked Sendable {
         let text: String
         /// How high the original speaker's voice is, in Hz (0: not known).
         let pitch: Double
+        /// How long the line's original sound is, in seconds (0: not known).
+        let original: Double
         /// Chosen without doubt (the only sound for these words, or the scene decided).
         var sure = false
         /// Several sounds and nothing to choose by: this line gets no voice.
@@ -102,6 +105,7 @@ final class DubPack: @unchecked Sendable {
     private var entriesAt = 0
     private var partsAt = 0
     private var pitchAt = 0             // 0: an index without pitches
+    private var originalAt = 0          // 0: an index without the lengths of the original sounds
     private var textAt = 0
     private var complete = false
     // The scenes of the last lines, newest last, and the sounds started lately.
@@ -147,7 +151,8 @@ final class DubPack: @unchecked Sendable {
         entriesAt = startsAt + (keys + 1) * 4
         partsAt = entriesAt + entryCount * 24
         pitchAt = layout.pitches ? partsAt + partCount * 4 : 0
-        textAt = partsAt + partCount * 4 + (layout.pitches ? entryCount : 0)
+        originalAt = layout.originals ? pitchAt + entryCount : 0
+        textAt = partsAt + partCount * 4 + (layout.pitches ? entryCount : 0) + (layout.originals ? entryCount * 2 : 0)
         var whole = true
         for n in 0..<partCount where Self.fileSize(Self.partURL(n)) != Int(Self.u32(d, partsAt + n * 4)) { whole = false }
         complete = whole
@@ -159,14 +164,15 @@ final class DubPack: @unchecked Sendable {
         load()
     }
 
-    private static func layout(_ d: Data) -> (keys: Int, entries: Int, text: Int, parts: Int, pitches: Bool)? {
+    private static func layout(_ d: Data) -> (keys: Int, entries: Int, text: Int, parts: Int, pitches: Bool, originals: Bool)? {
         guard d.count >= 24 else { return nil }
-        let pitches = d.prefix(8) == Data("TRSS0002".utf8)
+        let originals = d.prefix(8) == Data("TRSS0003".utf8)
+        let pitches = originals || d.prefix(8) == Data("TRSS0002".utf8)
         guard pitches || d.prefix(8) == Data("TRSS0001".utf8) else { return nil }
         let k = Int(u32(d, 8)), e = Int(u32(d, 12)), t = Int(u32(d, 16)), p = Int(u32(d, 20))
         guard k > 0, e > 0, p > 0, p <= 255,
-              d.count >= 24 + k * 8 + (k + 1) * 4 + e * 24 + p * 4 + (pitches ? e : 0) + t else { return nil }
-        return (k, e, t, p, pitches)
+              d.count >= 24 + k * 8 + (k + 1) * 4 + e * 24 + p * 4 + (pitches ? e : 0) + (originals ? e * 2 : 0) + t else { return nil }
+        return (k, e, t, p, pitches, originals)
     }
 
     /// The sizes of the sound files an index asks for; nil when the data is not an index.
@@ -203,11 +209,12 @@ final class DubPack: @unchecked Sendable {
         let from = textAt + textStart
         let text = String(data: d.subdata(in: from..<(from + textLength)), encoding: .utf8) ?? ""
         let code = pitchAt > 0 ? Int(d[pitchAt + n]) : 0
+        let original = originalAt > 0 ? Double(Self.u16(d, originalAt + n * 2)) / 100 : 0
         let pitch = code > 0 ? 50 * pow(2, Double(code - 1) / 48) : 0
         return Entry(part: part, offset: Int(Self.u32(d, at)), length: Int(Self.u32(d, at + 4)),
                      order: Int(Self.u32(d, at + 8)), table: Int(Self.u16(d, at + 20)),
                      seconds: Double(Self.u16(d, at + 18)) / 100, continuation: flags & 1 != 0,
-                     begins: Double(flags >> 1) / 127, text: text, pitch: pitch)
+                     begins: Double(flags >> 1) / 127, text: text, pitch: pitch, original: original)
     }
 
     /// Every sound the pack has for these words. (Call with the lock held.)
