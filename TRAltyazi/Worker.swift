@@ -77,6 +77,8 @@ final class Worker: ObservableObject {
     /// Ready-made spoken lines (`DubPack`): a line that is in the pack is said with its own
     /// sound from the phone's storage, at once, also while another line is still being said.
     var dubOn = false
+    // Lines with several sounds that are waiting to hear who is talking (by their letters).
+    private var dubListening: [String: Date] = [:]
     /// Which voice says the lines: 0 = the phone's own, 1 = ZONOS3-Mini (when downloaded),
     /// 2 = ElevenLabs (over the internet, with the user's own key).
     var voiceEngine = 0
@@ -241,7 +243,10 @@ final class Worker: ObservableObject {
         // until the radio's next wake-up.
         let pulse = startBeat()
         let refresher = Task {
+            var round = 0
             while !Task.isCancelled && !self.stopRequested {
+                if round % 4 == 0 { await self.keepSoundCopy() }
+                round += 1
                 await self.loadInputs()
                 try? await Task.sleep(for: .seconds(15))
             }
@@ -428,6 +433,26 @@ final class Worker: ObservableObject {
         // A ready-made sound for this English line (the pack the user loaded): it goes to the TV
         // together with its Turkish text as soon as the line is read. The text is the one the
         // sound says; where a piece has none of its own, the table's.
+        // Several sounds for these words (the same line said by different people): the text goes
+        // out now, the sound once the game's own sound has told who is talking.
+        if dubOn, DubPack.shared.undecided(en), let shown = SubtitleTable.shared.lookup(en) ?? DubPack.shared.find(en)?.text {
+            let line = String(decoding: SubtitleTable.normalize(en), as: UTF8.self)
+            let now = Date()
+            // Asked once for a line: while it stays on screen (the TV sends it again), not again.
+            let seen = dubListening[line]
+            dubListening[line] = now
+            if seen.map({ now.timeIntervalSince($0) < 8 }) != true {
+                if dubListening.count > 40 { dubListening = dubListening.filter { now.timeIntervalSince($0.value) < 30 } }
+                let id = job.id
+                Task { await self.chooseDubByEar(en, id: id, readAt: t0) }
+            }
+            tableHits += 1
+            lastTranslateMs = 0
+            lastTR = shown; lastNatural = shown
+            remember(en, shown)
+            await post(id: job.id, tr: shown, en: en, ocrMs: ocrMs, tlMs: 0, final: true, spoken: true)
+            return
+        }
         if dubOn, let match = DubPack.shared.find(en), let shown = match.text ?? SubtitleTable.shared.lookup(en) {
             let sounds = DubPack.shared.claim(match)
             if !sounds.isEmpty {
@@ -1060,6 +1085,35 @@ final class Worker: ObservableObject {
         guard String(data: data, encoding: .utf8) == "ok" else { return false }
         playingUntil = max(playingUntil, Date()).addingTimeInterval(Double(clip.pcm.count / 2) / Double(max(clip.rate, 1)))
         return true
+    }
+
+    /// A line with several ready-made sounds: listens to the game's sound as the line appears
+    /// (half a second around it, from the TV) and takes the sound whose speaker is as high or low
+    /// as the voice talking. When nothing can be heard, the scene decides or the line stays text.
+    private func chooseDubByEar(_ en: String, id: Int, readAt: Date) async {
+        var hz = 0.0
+        if let clip = await voiceClip(id: id, before: 150, after: 350), !clip.own { hz = Double(Self.pitch(clip.pcm, rate: clip.rate)) }
+        // No voice yet: the character may start a moment after the subtitle appears.
+        if hz == 0, let clip = await voiceClip(id: id, before: 0, after: 750), !clip.own { hz = Double(Self.pitch(clip.pcm, rate: clip.rate)) }
+        guard let match = DubPack.shared.find(en, heard: hz) else { return }
+        let sounds = DubPack.shared.claim(match)
+        let outcome = sounds.first.map { String(format: "took the one at %.0f Hz (table %d)", $0.pitch, $0.table) } ?? "left without a voice"
+        note(String(format: "dub %d: several voices for the line, the game's voice at %.0f Hz, %@", id, hz, outcome))
+        guard !sounds.isEmpty else {
+            dubNote = String(format: "Birden çok ses · oyundaki ses %.0f Hz · seçilemedi, sessiz", hz)
+            return
+        }
+        dubHits += 1
+        await sendDub(sounds, id: id, readAt: readAt)
+    }
+
+    /// Keeps the TV's copy of the game's sound running (it stops two minutes after the last
+    /// request): it must already be running when a line with several sounds appears.
+    private func keepSoundCopy() async {
+        guard dubOn, !key.isEmpty, let url = URL(string: "http://\(host):8090/voice?k=\(key)&test=1&before=100&after=400") else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 4
+        _ = try? await voiceNet.data(for: request)
     }
 
     /// Reads a ready-made line from the phone's storage and hands it to the TV. Nothing waits

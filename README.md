@@ -20,8 +20,9 @@ Bir oyunun repliklerini önceden Türkçe seslendirdiyseniz, uygulama satırı e
 telefonun deposundan okuyup TV'ye yollar; ses üretilmez, bilgisayar gerekmez. Paket bir dizin (`ses.trsx`: İngilizce
 satırın özeti → ses, sahne bilgisiyle) ve 64 MB'lik ses dosyalarından (`ses-000.trsd`…, MP3) oluşur; biçimi
 `TRAltyazi/DubPack.swift` başında yazılı. Uygulamadaki "Hazır dublaj" bölümüne paketin bulunduğu klasörün ev
-ağınızdaki adresi yazılıp bir kez indirilir; yarıda kesilen indirme kaldığı yerden sürer. Aynı cümle birkaç sahnede
-geçiyorsa son satırların sahnesindeki ses seçilir. Hazır satırlar TV'de sıraya girmez: yeni satır, önceki bitmeden
+ağınızdaki adresi yazılıp bir kez indirilir; yarıda kesilen indirme kaldığı yerden sürer. Aynı cümleyi birkaç
+kişi söylüyorsa uygulama TV'den oyunun o anki sesini (yarım saniye) alır ve özgün konuşanı o sese en yakın
+kalınlıkta/incelikte olan sesi seçer; ses duyulamazsa sahneye bakar, o da yoksa satırı sessiz bırakır. Hazır satırlar TV'de sıraya girmez: yeni satır, önceki bitmeden
 başlar (TV arayüzü 0.12.0 ve sonrası). Bu depoda ses paketi yoktur; kendi paketinizi siz üretirsiniz.
 
 ## Sesli çeviri: deneysel, kurmayın

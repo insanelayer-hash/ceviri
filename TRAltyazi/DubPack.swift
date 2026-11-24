@@ -7,9 +7,12 @@ import AVFoundation
 /// pack is spoken without anything being produced: the sound is read from the phone's storage
 /// and handed to the TV. The pack holds no English text.
 ///
-/// Index layout (little-endian): "TRSS0001" | u32 keys K | u32 entries E | u32 text size |
+/// Index layout (little-endian): "TRSS0002" | u32 keys K | u32 entries E | u32 text size |
 /// u32 sound files P | K x u64 digests, sorted | (K+1) x u32 first entry of a key |
-/// E x 24-byte entry | P x u32 size of each sound file | UTF-8 text.
+/// E x 24-byte entry | P x u32 size of each sound file | E x u8 pitch | UTF-8 text.
+/// ("TRSS0001" is the same without the pitches.)
+/// Pitch: how high the voice of the line's original speaker is at its start; 0 = not known,
+/// otherwise 1 + quarter semitones above 50 Hz. Filled in where a key has several sounds.
 /// Entry: u32 place in its sound file | u32 length | u32 order of the line in its table |
 /// u32 text start | u16 text length | u16 length of the sound in 1/100 s | u16 table |
 /// u8 sound file | u8 flags. Flags: bit 0 = a later piece of a line the game shows in pieces
@@ -18,8 +21,11 @@ import AVFoundation
 /// `SubtitleTable`.
 ///
 /// One English line can have several sounds (the same words said in another scene by someone
-/// else). Each entry says which table (scene) it is from and where in it; the sound from the
-/// scene of the lines seen a moment ago is taken.
+/// else). Then the game's own sound decides: the TV hands over what is being said as the line
+/// appears, and the sound whose original speaker is as high or low as that voice is taken (so a
+/// woman's line is not said by a man). Among sounds about equally near, and when nothing could
+/// be heard, the scene decides: each entry says which table (scene) it is from and where in it.
+/// With nothing to go on, the line is left without a voice rather than given a wrong one.
 final class DubPack: @unchecked Sendable {
     static let shared = DubPack()
 
@@ -49,17 +55,22 @@ final class DubPack: @unchecked Sendable {
         /// Where in the sound this piece begins (0...1); 0 for a whole line and a first piece.
         let begins: Double
         let text: String
+        /// How high the original speaker's voice is, in Hz (0: not known).
+        let pitch: Double
         /// Chosen without doubt (the only sound for these words, or the scene decided).
         var sure = false
+        /// Several sounds and nothing to choose by: this line gets no voice.
+        var mute = false
         /// Names the sound itself: entries of the pieces of one line share it.
         var sound: UInt64 { UInt64(part) << 32 | UInt64(offset) }
     }
 
     struct Match {
         let entries: [Entry]
-        /// The Turkish text of exactly these sounds; nil when a piece has no text of its own.
+        /// The Turkish text of exactly these sounds; nil when a piece has no text of its own or
+        /// no sound was chosen for it.
         var text: String? {
-            let texts = entries.map { $0.text }
+            let texts = entries.map { $0.mute ? "" : $0.text }
             return texts.contains("") ? nil : texts.joined(separator: " ")
         }
     }
@@ -85,6 +96,7 @@ final class DubPack: @unchecked Sendable {
     private var startsAt = 0
     private var entriesAt = 0
     private var partsAt = 0
+    private var pitchAt = 0             // 0: an index without pitches
     private var textAt = 0
     private var complete = false
     // The scenes of the last lines, newest last, and the sounds started lately.
@@ -129,7 +141,8 @@ final class DubPack: @unchecked Sendable {
         startsAt = digestsAt + keys * 8
         entriesAt = startsAt + (keys + 1) * 4
         partsAt = entriesAt + entryCount * 24
-        textAt = partsAt + partCount * 4
+        pitchAt = layout.pitches ? partsAt + partCount * 4 : 0
+        textAt = partsAt + partCount * 4 + (layout.pitches ? entryCount : 0)
         var whole = true
         for n in 0..<partCount where Self.fileSize(Self.partURL(n)) != Int(Self.u32(d, partsAt + n * 4)) { whole = false }
         complete = whole
@@ -141,11 +154,14 @@ final class DubPack: @unchecked Sendable {
         load()
     }
 
-    private static func layout(_ d: Data) -> (keys: Int, entries: Int, text: Int, parts: Int)? {
-        guard d.count >= 24, d.prefix(8) == Data("TRSS0001".utf8) else { return nil }
+    private static func layout(_ d: Data) -> (keys: Int, entries: Int, text: Int, parts: Int, pitches: Bool)? {
+        guard d.count >= 24 else { return nil }
+        let pitches = d.prefix(8) == Data("TRSS0002".utf8)
+        guard pitches || d.prefix(8) == Data("TRSS0001".utf8) else { return nil }
         let k = Int(u32(d, 8)), e = Int(u32(d, 12)), t = Int(u32(d, 16)), p = Int(u32(d, 20))
-        guard k > 0, e > 0, p > 0, p <= 255, d.count >= 24 + k * 8 + (k + 1) * 4 + e * 24 + p * 4 + t else { return nil }
-        return (k, e, t, p)
+        guard k > 0, e > 0, p > 0, p <= 255,
+              d.count >= 24 + k * 8 + (k + 1) * 4 + e * 24 + p * 4 + (pitches ? e : 0) + t else { return nil }
+        return (k, e, t, p, pitches)
     }
 
     /// The sizes of the sound files an index asks for; nil when the data is not an index.
@@ -181,10 +197,12 @@ final class DubPack: @unchecked Sendable {
         guard part < partCount, textStart + textLength <= textSize else { return nil }
         let from = textAt + textStart
         let text = String(data: d.subdata(in: from..<(from + textLength)), encoding: .utf8) ?? ""
+        let code = pitchAt > 0 ? Int(d[pitchAt + n]) : 0
+        let pitch = code > 0 ? 50 * pow(2, Double(code - 1) / 48) : 0
         return Entry(part: part, offset: Int(Self.u32(d, at)), length: Int(Self.u32(d, at + 4)),
                      order: Int(Self.u32(d, at + 8)), table: Int(Self.u16(d, at + 20)),
                      seconds: Double(Self.u16(d, at + 18)) / 100, continuation: flags & 1 != 0,
-                     begins: Double(flags >> 1) / 127, text: text)
+                     begins: Double(flags >> 1) / 127, text: text, pitch: pitch)
     }
 
     /// Every sound the pack has for these words. (Call with the lock held.)
@@ -206,8 +224,33 @@ final class DubPack: @unchecked Sendable {
         return []
     }
 
-    /// The one sound for these words. (Call with the lock held.)
-    private func pick(_ text: String, now: Date) -> Entry? {
+    /// Whether these words have several sounds to choose from: nil when the pack has no sound
+    /// for them, false when there is one (or the line's sound is already going). (Lock held.)
+    private func severalSounds(_ text: String, now: Date) -> Bool? {
+        let all = candidates(text)
+        guard !all.isEmpty else { return nil }
+        if all.contains(where: { e in
+            guard e.continuation, let at = started[e.sound] else { return false }
+            return now.timeIntervalSince(at) < e.seconds + 10
+        }) { return false }
+        let starters = all.filter { !$0.continuation }
+        return (starters.isEmpty ? all : starters).count > 1
+    }
+
+    /// True when the line has several sounds, so that hearing who is talking helps to choose.
+    func undecided(_ english: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard complete else { return false }
+        let now = Date()
+        if let whole = severalSounds(english, now: now) { return whole }
+        let pieces = SubtitleTable.sentences(english)
+        guard pieces.count >= 2 else { return false }
+        return pieces.contains { severalSounds($0, now: now) == true }
+    }
+
+    /// The one sound for these words. `heard`: how high the voice talking in the game is, in Hz
+    /// (nil or 0: not known). (Call with the lock held.)
+    private func pick(_ text: String, now: Date, heard: Double?) -> Entry? {
         let all = candidates(text)
         guard !all.isEmpty else { return nil }
         // The line goes on: the game shows it in pieces, and the sound that began with its first
@@ -228,41 +271,61 @@ final class DubPack: @unchecked Sendable {
             best.sure = true
             return best
         }
-        // The same words in several scenes: the scene of the lines seen lately decides, and
-        // within it the line nearest to them. With nothing to go on, the first one is taken.
-        var bestScore = 0.0
-        for e in pool {
+        // The same words in several scenes. How well each fits the scene of the lines seen
+        // lately (the same table, and near them in it; older lines count less):
+        let scores: [Double] = pool.map { e in
             var score = 0.0
             for s in scene where s.table == e.table {
                 let weight = 1 / (1 + now.timeIntervalSince(s.at) / 60)
                 score += weight * (abs(s.order - e.order) <= 30 ? 2 : 1)
             }
-            if score > bestScore {
-                best = e
-                bestScore = score
-            }
+            return score
         }
-        best.sure = bestScore > 0
+        // The voice talking in the game was heard: the sound whose original speaker is as high
+        // or low is taken; among those about equally near, the one that fits the scene.
+        let known = pool.indices.filter { pool[$0].pitch > 0 }
+        if let heard, heard > 0, !known.isEmpty {
+            func distance(_ i: Int) -> Double { abs(12 * log2(pool[i].pitch / heard)) }
+            let nearest = known.map { distance($0) }.min() ?? 99
+            let close = known.filter { distance($0) <= nearest + 1.5 }
+            if nearest <= 6, let i = close.max(by: { (scores[$0], -distance($0)) < (scores[$1], -distance($1)) }) {
+                best = pool[i]
+                best.sure = scores[i] > 0
+                return best
+            }
+            // Nobody here sounds like the one who is talking.
+            best.mute = true
+            return best
+        }
+        // Not heard: the scene decides, but only a scene that is still going on (a line of it
+        // in the last minute or so). Otherwise no voice rather than a wrong one.
+        if let i = pool.indices.max(by: { scores[$0] < scores[$1] }), scores[i] >= 0.5 {
+            best = pool[i]
+            best.sure = true
+            return best
+        }
+        best.mute = true
         return best
     }
 
     /// The sounds for an English subtitle as read from the screen, or nil. The same three steps
     /// as `SubtitleTable.lookup`: the whole line; sentence by sentence; with a short tail left
-    /// out (the mission note the TV reads as part of the line).
-    func find(_ english: String) -> Match? {
+    /// out (the mission note the TV reads as part of the line). `heard`: how high the voice
+    /// talking in the game is (for a line with several sounds).
+    func find(_ english: String, heard: Double? = nil) -> Match? {
         lock.lock(); defer { lock.unlock() }
         guard complete else { return nil }
         let now = Date()
-        if let e = pick(english, now: now) { return Match(entries: [e]) }
+        if let e = pick(english, now: now, heard: heard) { return Match(entries: [e]) }
         let pieces = SubtitleTable.sentences(english)
         guard pieces.count >= 2 else { return nil }
-        let single = pieces.map { pick($0, now: now) }
+        let single = pieces.map { pick($0, now: now, heard: heard) }
         if single.allSatisfy({ $0 != nil }) { return Match(entries: single.compactMap { $0 }) }
         var k = pieces.count - 1
         while k >= 1 {
             let tailWords = pieces[k...].joined(separator: " ").split(whereSeparator: { $0.isWhitespace }).count
             if tailWords > 6 { break }
-            if let e = pick(pieces[..<k].joined(separator: " "), now: now) { return Match(entries: [e]) }
+            if let e = pick(pieces[..<k].joined(separator: " "), now: now, heard: heard) { return Match(entries: [e]) }
             if single[..<k].allSatisfy({ $0 != nil }) { return Match(entries: single[..<k].compactMap { $0 }) }
             k -= 1
         }
@@ -276,7 +339,7 @@ final class DubPack: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let now = Date()
         var out: [Entry] = []
-        for e in match.entries {
+        for e in match.entries where !e.mute {
             if e.sure, scene.last.map({ $0.table != e.table || $0.order != e.order }) ?? true {
                 scene.append((e.table, e.order, now))
                 if scene.count > 12 { scene.removeFirst(scene.count - 12) }
@@ -374,10 +437,10 @@ final class DubPack: @unchecked Sendable {
             try? fm.removeItem(at: tempIndex)
             throw PackError.notAPack
         }
-        // Another pack than the one here: its sounds lie elsewhere in the files, so the old files go.
-        if let old = try? Data(contentsOf: indexURL), old != fresh {
-            for n in 0..<256 { try? fm.removeItem(at: partURL(n)) }
-        }
+        // Sound files of the size the new index asks for are kept (an index made again over the
+        // same sounds needs no new download); the others are fetched below, and files the new
+        // index does not know go.
+        for n in sizes.count..<256 { try? fm.removeItem(at: partURL(n)) }
         try? fm.removeItem(at: indexURL)
         try fm.moveItem(at: tempIndex, to: indexURL)
 
