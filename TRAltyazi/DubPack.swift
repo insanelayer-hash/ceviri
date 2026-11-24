@@ -17,7 +17,7 @@ import AVFoundation
 /// u32 text start | u16 text length | u16 length of the sound in 1/100 s | u16 table |
 /// u8 sound file | u8 flags. Flags: bit 0 = a later piece of a line the game shows in pieces
 /// (the sound is the one that began with the line's first piece); bits 1-7 = where in the sound
-/// this piece begins, in 127ths. The sounds are MP3. Digest and normalising are those of
+/// this piece begins, in 127ths (for the first piece of such a line: where that piece ends). The sounds are MP3. Digest and normalising are those of
 /// `SubtitleTable`.
 ///
 /// One English line can have several sounds (the same words said in another scene by someone
@@ -52,7 +52,9 @@ final class DubPack: @unchecked Sendable {
         let seconds: Double
         /// A later piece of a line the game shows in pieces: the sound began with the first piece.
         let continuation: Bool
-        /// Where in the sound this piece begins (0...1); 0 for a whole line and a first piece.
+        /// For a later piece: where in the sound it begins (0...1). For the first piece of a line
+        /// shown in pieces: where that piece ends (the sound goes on with the rest of the line).
+        /// 0 for a whole line.
         let begins: Double
         let text: String
         /// How high the original speaker's voice is, in Hz (0: not known).
@@ -61,6 +63,9 @@ final class DubPack: @unchecked Sendable {
         var sure = false
         /// Several sounds and nothing to choose by: this line gets no voice.
         var mute = false
+        /// The first piece of a longer line, taken without the scene saying it is that line: only
+        /// the piece itself is played, not the rest of the line.
+        var cut = false
         /// Names the sound itself: entries of the pieces of one line share it.
         var sound: UInt64 { UInt64(part) << 32 | UInt64(offset) }
     }
@@ -286,11 +291,16 @@ final class DubPack: @unchecked Sendable {
         let known = pool.indices.filter { pool[$0].pitch > 0 }
         if let heard, heard > 0, !known.isEmpty {
             func distance(_ i: Int) -> Double { abs(12 * log2(pool[i].pitch / heard)) }
-            let nearest = known.map { distance($0) }.min() ?? 99
-            let close = known.filter { distance($0) <= nearest + 1.5 }
+            // A sound that goes on after these words (they are the first piece of a longer line)
+            // is for its own scene; elsewhere the sounds that say just these words come first.
+            let whole = known.filter { pool[$0].continuation || pool[$0].begins == 0 || scores[$0] > 0 }
+            let choice = whole.isEmpty ? known : whole
+            let nearest = choice.map { distance($0) }.min() ?? 99
+            let close = choice.filter { distance($0) <= nearest + 1.5 }
             if nearest <= 6, let i = close.max(by: { (scores[$0], -distance($0)) < (scores[$1], -distance($1)) }) {
                 best = pool[i]
                 best.sure = scores[i] > 0
+                best.cut = !best.continuation && best.begins > 0 && scores[i] == 0
                 return best
             }
             // Nobody here sounds like the one who is talking.
@@ -345,8 +355,10 @@ final class DubPack: @unchecked Sendable {
                 if scene.count > 12 { scene.removeFirst(scene.count - 12) }
             }
             let quiet = e.continuation ? e.seconds + 10 : max(8, e.seconds + 5)
-            if let at = started[e.sound], now.timeIntervalSince(at) < quiet { continue }
-            started[e.sound] = now
+            // A sound played only as far as its first piece does not count as the line going on.
+            let name = e.cut ? e.sound | (UInt64(1) << 63) : e.sound
+            if let at = started[name], now.timeIntervalSince(at) < quiet { continue }
+            started[name] = now
             out.append(e)
         }
         if started.count > 200 { started = started.filter { now.timeIntervalSince($0.value) < 120 } }
@@ -409,7 +421,14 @@ final class DubPack: @unchecked Sendable {
                 let fade = min(rate / 50, samples.count - first)
                 for i in 0..<fade { samples[first + i] = Int16(Int(samples[first + i]) * i / fade) }
             }
-            let pcm = samples[first...].withUnsafeBufferPointer { Data(buffer: $0) }
+            // Only the first piece of a longer line is wanted: up to where it ends, faded out.
+            var last = samples.count
+            if e.cut, !e.continuation, e.begins > 0 {
+                last = min(samples.count, first + Int(Double(samples.count - first) * e.begins) + rate * 3 / 20)
+                let fade = min(rate / 25, last - first)
+                for i in 0..<fade { samples[last - 1 - i] = Int16(Int(samples[last - 1 - i]) * i / fade) }
+            }
+            let pcm = samples[first..<last].withUnsafeBufferPointer { Data(buffer: $0) }
             return (pcm, rate)
         } catch {
             return nil
