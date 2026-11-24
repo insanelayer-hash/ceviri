@@ -272,12 +272,8 @@ final class DubPack: @unchecked Sendable {
         let starters = all.filter { !$0.continuation }
         let pool = starters.isEmpty ? all : starters
         var best = pool[0]
-        if pool.count == 1 {
-            best.sure = true
-            return best
-        }
-        // The same words in several scenes. How well each fits the scene of the lines seen
-        // lately (the same table, and near them in it; older lines count less):
+        // How well each sound fits the scene of the lines seen lately (the same table, and near
+        // them in it; older lines count less):
         let scores: [Double] = pool.map { e in
             var score = 0.0
             for s in scene where s.table == e.table {
@@ -286,6 +282,15 @@ final class DubPack: @unchecked Sendable {
             }
             return score
         }
+        if pool.count == 1 {
+            best.sure = true
+            // The only sound for these words is the beginning of a longer line. Unless the scene
+            // says it is that line, the same short words are being said somewhere else: only the
+            // piece is played, not the rest of that line.
+            best.cut = !best.continuation && best.begins > 0 && scores[0] == 0
+            return best
+        }
+        // The same words in several scenes.
         // The voice talking in the game was heard: the sound whose original speaker is as high
         // or low is taken; among those about equally near, the one that fits the scene.
         let known = pool.indices.filter { pool[$0].pitch > 0 }
