@@ -13,7 +13,8 @@ import AVFoundation
 /// E x u16 length of the line's original sound in 1/100 s (0 = not known) comes after the
 /// pitches. ("TRSS0002" is the same without those lengths, "TRSS0001" without the pitches too.)
 /// Pitch: how high the voice of the line's original speaker is at its start; 0 = not known,
-/// otherwise 1 + quarter semitones above 50 Hz. Filled in where a key has several sounds.
+/// otherwise 1 + quarter semitones above 50 Hz. Filled in for every sound (older packs: only
+/// where a key has several sounds).
 /// Entry: u32 place in its sound file | u32 length | u32 order of the line in its table |
 /// u32 text start | u16 text length | u16 length of the sound in 1/100 s | u16 table |
 /// u8 sound file | u8 flags. Flags: bit 0 = a later piece of a line the game shows in pieces
@@ -381,7 +382,9 @@ final class DubPack: @unchecked Sendable {
 
     /// The sounds as one clip for the TV: 16-bit mono samples with the mark in front. Reads the
     /// phone's storage and unpacks MP3 (some hundredths of a second): call it off the main thread.
-    func clip(_ sounds: [Entry]) -> Speaker.Clip? {
+    /// `gain`: how loud (1 = as in the pack). Above 1 the loudest parts are rounded off instead
+    /// of being cut flat, so a line that is already at full level does not crackle.
+    func clip(_ sounds: [Entry], gain: Double = 1) -> Speaker.Clip? {
         var pcm = Data()
         for v in Self.mark { withUnsafeBytes(of: v.littleEndian) { pcm.append(contentsOf: $0) } }
         var rate = 0
@@ -391,7 +394,21 @@ final class DubPack: @unchecked Sendable {
             pcm.append(sound.pcm)
             rate = sound.rate
         }
-        return rate == 0 ? nil : Speaker.Clip(pcm: pcm, rate: rate)
+        guard rate != 0 else { return nil }
+        if abs(gain - 1) > 0.01 {
+            let first = Self.mark.count          // the mark stays as it is: the TV knows the line by it
+            pcm.withUnsafeMutableBytes { raw in
+                let s = raw.bindMemory(to: Int16.self)
+                guard s.count > first else { return }
+                for i in first..<s.count {
+                    var v = Double(Int16(littleEndian: s[i])) / 32768 * gain
+                    let size = abs(v)
+                    if size > 0.7 { v = (v < 0 ? -1 : 1) * (0.7 + 0.3 * tanh((size - 0.7) / 0.3)) }
+                    s[i] = Int16(max(-32767, min(32767, (v * 32768).rounded()))).littleEndian
+                }
+            }
+        }
+        return Speaker.Clip(pcm: pcm, rate: rate)
     }
 
     private static func unpack(_ e: Entry) -> (pcm: Data, rate: Int)? {

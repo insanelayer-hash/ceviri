@@ -77,6 +77,8 @@ final class Worker: ObservableObject {
     /// Ready-made spoken lines (`DubPack`): a line that is in the pack is said with its own
     /// sound from the phone's storage, at once, also while another line is still being said.
     var dubOn = false
+    /// How loud the ready-made lines are played: 1 = as they are in the pack, 0.1 ... 1.5.
+    var dubVolume = 1.0
     // Lines with several sounds that are waiting to hear who is talking (by their letters).
     private var dubListening: [String: Date] = [:]
     /// Which voice says the lines: 0 = the phone's own, 1 = ZONOS3-Mini (when downloaded),
@@ -430,13 +432,28 @@ final class Worker: ObservableObject {
             if voiceTasks.count > 40 { voiceTasks = voiceTasks.filter { $0.key > id - 20 } }
         }
 
+        // The game can show who talks in front of the line ("Lucia: Well, …"). The table and the
+        // pack hold the lines without the name: a line that is in neither as read is looked up
+        // without it, and the name goes back in front of the Turkish line.
+        var said = en, nameShown = "", speakerName = ""
+        if let named = SubtitleTable.speakerLabel(en), SubtitleTable.shared.lookup(en) == nil,
+           !dubOn || DubPack.shared.find(en) == nil,
+           SubtitleTable.shared.lookup(named.rest) != nil || (dubOn && DubPack.shared.find(named.rest) != nil) {
+            said = named.rest
+            nameShown = named.name + ": "
+            speakerName = named.name
+        }
+        let who = speakerName
+
         // A ready-made sound for this English line (the pack the user loaded): it goes to the TV
         // together with its Turkish text as soon as the line is read. The text is the one the
         // sound says; where a piece has none of its own, the table's.
         // Several sounds for these words (the same line said by different people): the text goes
-        // out now, the sound once the game's own sound has told who is talking.
-        if dubOn, DubPack.shared.undecided(en), let shown = SubtitleTable.shared.lookup(en) ?? DubPack.shared.find(en)?.text {
-            let line = String(decoding: SubtitleTable.normalize(en), as: UTF8.self)
+        // out now, the sound once it is known who is talking: by the name the game shows, when
+        // how high that character talks is known already, otherwise by the game's own sound.
+        if dubOn, DubPack.shared.undecided(said), let found = SubtitleTable.shared.lookup(said) ?? DubPack.shared.find(said)?.text {
+            let shown = nameShown + found
+            let line = String(decoding: SubtitleTable.normalize(said), as: UTF8.self)
             let now = Date()
             // Asked once for a line: while it stays on screen (the TV sends it again), not again.
             let seen = dubListening[line]
@@ -444,7 +461,8 @@ final class Worker: ObservableObject {
             if seen.map({ now.timeIntervalSince($0) < 8 }) != true {
                 if dubListening.count > 40 { dubListening = dubListening.filter { now.timeIntervalSince($0.value) < 30 } }
                 let id = job.id
-                Task { await self.chooseDubByEar(en, id: id, readAt: t0) }
+                let words = said
+                Task { await self.chooseDubByEar(words, id: id, readAt: t0, name: who) }
             }
             tableHits += 1
             lastTranslateMs = 0
@@ -453,9 +471,14 @@ final class Worker: ObservableObject {
             await post(id: job.id, tr: shown, en: en, ocrMs: ocrMs, tlMs: 0, final: true, spoken: true)
             return
         }
-        if dubOn, let match = DubPack.shared.find(en), let shown = match.text ?? SubtitleTable.shared.lookup(en) {
+        if dubOn, let match = DubPack.shared.find(said), let found = match.text ?? SubtitleTable.shared.lookup(said) {
+            let shown = nameShown + found
             let sounds = DubPack.shared.claim(match)
             if !sounds.isEmpty {
+                // The only sound for the words of a line shown under a name: its original speaker
+                // is that character, so this is how high the character talks.
+                if !who.isEmpty, match.entries.count == 1, let only = match.entries.first,
+                   only.sure, !only.continuation, !only.cut { learnPitch(who, only.pitch) }
                 dubHits += 1
                 let id = job.id
                 let startAt = dubStart(sounds, shownAt: t0)
@@ -471,7 +494,8 @@ final class Worker: ObservableObject {
 
         // A ready-made Turkish line for this English line (the table the user loaded): nothing
         // to translate, it goes to the TV as soon as the line is read.
-        if let ready = SubtitleTable.shared.lookup(en) {
+        if let found = SubtitleTable.shared.lookup(said) {
+            let ready = nameShown + found
             tableHits += 1
             lastTranslateMs = 0
             lastTR = ready; lastNatural = ready
@@ -1091,21 +1115,56 @@ final class Worker: ObservableObject {
     /// A line with several ready-made sounds: listens to the game's sound as the line appears
     /// (half a second around it, from the TV) and takes the sound whose speaker is as high or low
     /// as the voice talking. When nothing can be heard, the scene decides or the line stays text.
-    private func chooseDubByEar(_ en: String, id: Int, readAt: Date) async {
-        var hz = 0.0
-        if let clip = await voiceClip(id: id, before: 150, after: 350), !clip.own { hz = Double(Self.pitch(clip.pcm, rate: clip.rate)) }
-        // No voice yet: the character may start a moment after the subtitle appears.
-        if hz == 0, let clip = await voiceClip(id: id, before: 0, after: 750), !clip.own { hz = Double(Self.pitch(clip.pcm, rate: clip.rate)) }
+    /// `name`: the speaker's name the game shows in front of the line ("" when it shows none).
+    /// When how high that character talks is known from earlier lines, the sound is chosen by
+    /// that at once, without listening: listening takes half a second and hears nothing over
+    /// music, engines or our own line.
+    private func chooseDubByEar(_ en: String, id: Int, readAt: Date, name: String = "") async {
+        var hz = knownPitch(name)
+        var by = "the game's voice"
+        if hz > 0, let known = DubPack.shared.find(en, heard: hz), known.entries.contains(where: { !$0.mute }) {
+            by = "the name " + name
+        } else {
+            hz = 0
+            if let clip = await voiceClip(id: id, before: 150, after: 350), !clip.own { hz = Double(Self.pitch(clip.pcm, rate: clip.rate)) }
+            // No voice yet: the character may start a moment after the subtitle appears.
+            if hz == 0, let clip = await voiceClip(id: id, before: 0, after: 750), !clip.own { hz = Double(Self.pitch(clip.pcm, rate: clip.rate)) }
+            learnPitch(name, hz)
+        }
         guard let match = DubPack.shared.find(en, heard: hz) else { return }
         let sounds = DubPack.shared.claim(match)
         let outcome = sounds.first.map { String(format: "took the one at %.0f Hz (table %d)", $0.pitch, $0.table) } ?? "left without a voice"
-        note(String(format: "dub %d: several voices for the line, the game's voice at %.0f Hz, %@", id, hz, outcome))
+        note(String(format: "dub %d: several voices for the line, %@ at %.0f Hz, %@", id, by, hz, outcome))
         guard !sounds.isEmpty else {
             dubNote = String(format: "Birden çok ses · oyundaki ses %.0f Hz · seçilemedi, sessiz", hz)
             return
         }
         dubHits += 1
         await sendDub(sounds, id: id, readAt: readAt, startAt: dubStart(sounds, shownAt: readAt))
+    }
+
+    // How high each character talks, by the name the game shows in front of their lines: the
+    // pitches (Hz) of the last lines under that name.
+    private var namePitches: [String: [Double]] = [:]
+
+    /// A line under this name was said at this pitch (0 or out of a voice's range: not counted).
+    private func learnPitch(_ name: String, _ hz: Double) {
+        guard !name.isEmpty, hz >= 60, hz <= 420 else { return }
+        var list = namePitches[name] ?? []
+        list.append(hz)
+        if list.count > 15 { list.removeFirst(list.count - 15) }
+        if namePitches.count > 80, namePitches[name] == nil { namePitches.removeAll() }
+        namePitches[name] = list
+    }
+
+    /// How high the character of this name talks, in Hz: the middle of the lines so far, once
+    /// there are three and most of them agree. 0 when not known; a name such as "Locals" stands
+    /// for many people, their lines do not agree, and it stays 0.
+    private func knownPitch(_ name: String) -> Double {
+        guard let list = namePitches[name], list.count >= 3 else { return 0 }
+        let middle = list.sorted()[list.count / 2]
+        let near = list.filter { abs(12 * log2($0 / middle)) <= 3 }.count
+        return near * 10 >= list.count * 7 ? middle : 0
     }
 
     /// Keeps the TV's copy of the game's sound running (it stops two minutes after the last
@@ -1143,7 +1202,8 @@ final class Worker: ObservableObject {
     /// Reads a ready-made line from the phone's storage and hands it to the TV, at `startAt`
     /// (see `dubStart`); the TV plays ready-made lines over each other when they overlap.
     private func sendDub(_ sounds: [DubPack.Entry], id: Int, readAt: Date, startAt: Date) async {
-        let clip = await Task.detached(priority: .userInitiated) { DubPack.shared.clip(sounds) }.value
+        let gain = dubVolume
+        let clip = await Task.detached(priority: .userInitiated) { DubPack.shared.clip(sounds, gain: gain) }.value
         let wait = startAt.timeIntervalSinceNow
         if wait > 0.02 {
             note(String(format: "dub %d: waits %d ms for the line before it", id, Int(wait * 1000)))

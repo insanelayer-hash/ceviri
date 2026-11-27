@@ -110,6 +110,21 @@ final class SubtitleTable: @unchecked Sendable {
         return out
     }
 
+    /// The speaker's name the game shows in front of a line ("Lucia: Well, …") and the line
+    /// without it; nil when the line does not begin with such a name. The table and the sound
+    /// pack hold the lines without names.
+    static func speakerLabel(_ text: String) -> (name: String, rest: String)? {
+        guard let colon = text.firstIndex(of: ":") else { return nil }
+        let name = String(text[..<colon]).trimmingCharacters(in: .whitespaces)
+        let rest = String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name.count >= 2, name.count <= 28, let first = name.first, first.isLetter, first.isUppercase else { return nil }
+        guard name.split(separator: " ").count <= 4 else { return nil }
+        let allowed: Set<Character> = [" ", ".", "'", "’", "-", "&"]
+        guard name.allSatisfy({ $0.isLetter || $0.isNumber || allowed.contains($0) }) else { return nil }
+        guard rest.filter({ $0.isLetter }).count >= 2 else { return nil }
+        return (name, rest)
+    }
+
     private func exact(_ text: String) -> String? {
         let key = Self.normalize(text)
         guard key.count >= 2 else { return nil }

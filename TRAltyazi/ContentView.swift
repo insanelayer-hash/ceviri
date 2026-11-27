@@ -41,6 +41,7 @@ struct ContentView: View {
     @State private var tableBusy = false
     @AppStorage("dubURL") private var dubURL = ""
     @AppStorage("dub") private var dub = true
+    @AppStorage("dubVolume") private var dubVolume = 100.0
     @State private var dubReady = DubPack.shared.ready
     @State private var dubLines = DubPack.shared.lines
     @State private var dubProgress: Double?
@@ -74,6 +75,7 @@ struct ContentView: View {
             listenIfNeeded()
         }
         .onChange(of: dub) { _, value in worker.dubOn = value && DubPack.shared.ready }
+        .onChange(of: dubVolume) { _, value in worker.dubVolume = value / 100 }
     }
 
     private var pageWithZonos: some View {
@@ -313,6 +315,7 @@ struct ContentView: View {
         worker.fastReading = fastReading
         worker.voiceOn = voice
         worker.dubOn = dub && DubPack.shared.ready
+        worker.dubVolume = dubVolume / 100
         worker.voiceEngine = voiceEngine
         worker.zonosVoice = zonosVoice
         worker.zonosGPU = zonosGPU
@@ -396,6 +399,10 @@ struct ContentView: View {
             LabeledContent("Sesler", value: dubState)
             if dubReady {
                 Toggle("Hazır sesleri TV'den çal", isOn: $dub)
+                VStack(alignment: .leading) {
+                    Text(verbatim: "Dublaj sesi: %\(Int(dubVolume))")
+                    Slider(value: $dubVolume, in: 10...150, step: 5)
+                }
             }
             TextField("http://bilgisayarın-adresi:8124", text: $dubURL)
                 .keyboardType(.URL)
